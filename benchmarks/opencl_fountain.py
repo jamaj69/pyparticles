@@ -119,6 +119,14 @@ def run_steps(solver, steps):
     start = time.perf_counter()
     for _ in range(steps):
         solver.step()
+
+    # With host synchronization disabled, OpenCL execution is asynchronous.
+    # Include device completion in the timed region so compute-only numbers
+    # represent real kernel execution rather than Python enqueue overhead.
+    context = getattr(solver, "ocl_context", None)
+    if context is not None:
+        context.CL_queue.finish()
+
     return time.perf_counter() - start
 
 
