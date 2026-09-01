@@ -41,8 +41,6 @@ from OpenGL.GL import (
     glEnd,
     glEndQuery,
     glGenQueries,
-    glGetQueryObjectiv,
-    glGetQueryObjectui64v,
     glPointSize,
     glPopMatrix,
     glPushMatrix,
@@ -50,6 +48,12 @@ from OpenGL.GL import (
     glTranslatef,
     glVertex3f,
     glVertexPointer,
+)
+from OpenGL.raw.GL.VERSION.GL_1_5 import (
+    glGetQueryObjectiv as _raw_glGetQueryObjectiv,
+)
+from OpenGL.raw.GL.VERSION.GL_3_3 import (
+    glGetQueryObjectui64v as _raw_glGetQueryObjectui64v,
 )
 
 import pyparticles.ogl.draw_particles_ogl as legacy
@@ -94,6 +98,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
         # ready, otherwise the profiler itself would insert a GPU/CPU stall.
         self.__gpu_timing_enabled = False
         self.__gpu_timing_available = True
+        self.__gpu_timing_error = None
         self.__gpu_queries_pending = []
         self.__gpu_draw_seconds_ready = []
         self.__gpu_query_skipped = 0
@@ -172,19 +177,34 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
         get_gpu_timing_enabled, set_gpu_timing_enabled
     )
 
+    def _disable_gpu_timing(self, exc):
+        self.__gpu_timing_available = False
+        self.__gpu_timing_error = "%s: %s" % (
+            exc.__class__.__name__, exc
+        )
+
     def _poll_gpu_timing(self):
-        """Collect completed timer queries without waiting for the GPU."""
+        """Collect completed timer queries without waiting for the GPU.
+
+        Use raw OpenGL entry points with explicit ctypes output storage.  The
+        high-level PyOpenGL wrappers for glGetQueryObject* are not consistently
+        auto-wrapped on all installations and may require the output pointer.
+        """
         if not self.__gpu_queries_pending:
             return
 
         while self.__gpu_queries_pending:
             query = self.__gpu_queries_pending[0]
             try:
-                available = bool(
-                    glGetQueryObjectiv(query, GL_QUERY_RESULT_AVAILABLE)
+                available_value = ctypes.c_int(0)
+                _raw_glGetQueryObjectiv(
+                    query,
+                    GL_QUERY_RESULT_AVAILABLE,
+                    ctypes.byref(available_value),
                 )
-            except Exception:
-                self.__gpu_timing_available = False
+                available = bool(available_value.value)
+            except Exception as exc:
+                self._disable_gpu_timing(exc)
                 return
 
             if not available:
@@ -192,12 +212,17 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
 
             self.__gpu_queries_pending.pop(0)
             try:
-                elapsed_ns = int(
-                    glGetQueryObjectui64v(query, GL_QUERY_RESULT)
+                elapsed_value = ctypes.c_uint64(0)
+                _raw_glGetQueryObjectui64v(
+                    query,
+                    GL_QUERY_RESULT,
+                    ctypes.byref(elapsed_value),
                 )
-                self.__gpu_draw_seconds_ready.append(elapsed_ns * 1.0e-9)
-            except Exception:
-                self.__gpu_timing_available = False
+                self.__gpu_draw_seconds_ready.append(
+                    int(elapsed_value.value) * 1.0e-9
+                )
+            except Exception as exc:
+                self._disable_gpu_timing(exc)
             finally:
                 try:
                     glDeleteQueries(1, [query])
@@ -220,6 +245,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
             "pending": len(self.__gpu_queries_pending),
             "ready": len(self.__gpu_draw_seconds_ready),
             "skipped": int(self.__gpu_query_skipped),
+            "error": self.__gpu_timing_error,
         }
 
     gpu_timing_stats = property(get_gpu_timing_stats)
@@ -247,8 +273,8 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
             try:
                 query = int(glGenQueries(1))
                 glBeginQuery(GL_TIME_ELAPSED, query)
-            except Exception:
-                self.__gpu_timing_available = False
+            except Exception as exc:
+                self._disable_gpu_timing(exc)
                 query = None
         elif self.__gpu_timing_enabled:
             self.__gpu_query_skipped += 1
@@ -262,8 +288,8 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
                 try:
                     glEndQuery(GL_TIME_ELAPSED)
                     self.__gpu_queries_pending.append(query)
-                except Exception:
-                    self.__gpu_timing_available = False
+                except Exception as exc:
+                    self._disable_gpu_timing(exc)
                     try:
                         glDeleteQueries(1, [query])
                     except Exception:
