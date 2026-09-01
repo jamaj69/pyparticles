@@ -45,6 +45,12 @@ class DemoCompatibilityTests(unittest.TestCase):
             with self.subTest(module=module.__name__):
                 self.assertIs(module.aogl.AnimatedGl, animated_ogl_compat.AnimatedGl)
 
+    def test_animation_trajectory_step_property(self):
+        animation = animated_ogl_compat.AnimatedGl()
+        animation.trajectory_step = 3
+        self.assertEqual(animation.trajectory_step, 3)
+        self.assertEqual(animation.draw_particles.trajectory_step, 3)
+
     def test_draw_compat_properties_work_without_gl_context(self):
         draw = DrawParticlesGL()
         color_fun = lambda pset, i: (1.0, 1.0, 1.0, 1.0)
