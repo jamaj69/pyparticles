@@ -1,4 +1,5 @@
 import unittest
+import weakref
 
 import numpy as np
 
@@ -50,6 +51,28 @@ class DemoCompatibilityTests(unittest.TestCase):
         animation.trajectory_step = 3
         self.assertEqual(animation.trajectory_step, 3)
         self.assertEqual(animation.draw_particles.trajectory_step, 3)
+
+    def test_cleanup_callbacks_release_captured_objects(self):
+        class Captured(object):
+            pass
+
+        animation = animated_ogl_compat.AnimatedGl()
+        captured = Captured()
+        captured_ref = weakref.ref(captured)
+
+        def make_cleanup(obj):
+            def cleanup(_animation):
+                self.assertIsNotNone(obj)
+            return cleanup
+
+        animation.add_cleanup_callback(make_cleanup(captured))
+        del captured
+
+        animation.cleanup_resources()
+        self.assertIsNone(captured_ref())
+
+        # Cleanup remains idempotent after the callback list has been consumed.
+        animation.cleanup_resources()
 
     def test_draw_compat_properties_work_without_gl_context(self):
         draw = DrawParticlesGL()
