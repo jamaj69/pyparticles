@@ -8,16 +8,27 @@
 
 """Compatibility layer for the legacy PyParticles OpenGL animation.
 
-The renderer itself remains untouched.  This module adapts the pieces whose
+The historical renderer is kept intact.  This module adapts the pieces whose
 runtime behaviour changed between the 2012 PyOpenGL/GLUT stack and current
-FreeGLUT/PyOpenGL releases.
+FreeGLUT/PyOpenGL/NumPy releases.
 """
 
 import ctypes
 import signal
 
 import pyparticles.animation.animated_ogl as legacy
+import pyparticles.ogl.draw_particles_ogl as legacy_draw
+import pyparticles.ogl.draw_particles_ogl_compat as draw_compat
 
+
+# The legacy AnimatedGl constructor resolves DrawParticlesGL through the
+# ``drp`` module stored in animated_ogl.py.  Replace that constructor before
+# any AnimatedGl instance is created, while retaining the original renderer
+# module for the remainder of the OpenGL code.
+legacy_draw.DrawParticlesGL = draw_compat.DrawParticlesGL
+legacy_draw.charged_particles_color = draw_compat.charged_particles_color
+legacy_draw.charged_particles_vect_color = draw_compat.charged_particles_vect_color
+legacy.drp.DrawParticlesGL = draw_compat.DrawParticlesGL
 
 _legacy_key_pressed = legacy.KeyPressed
 
