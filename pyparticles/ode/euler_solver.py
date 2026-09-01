@@ -45,7 +45,7 @@ class EulerSolverOCL( os.OdeSolver ) :
     def __init__( self , force , p_set , dt , ocl_context=None ):
         super(EulerSolverOCL,self).__init__( force , p_set , dt )
         
-        if ocl_context == None :
+        if ocl_context is None :
             self.__occ = occ.OpenCLcontext( self.pset.size , self.pset.dim , ( occ.OCLC_X | occ.OCLC_V | occ.OCLC_A )  )
         else :
             self.__occ = ocl_context
@@ -73,6 +73,7 @@ class EulerSolverOCL( os.OdeSolver ) :
         """
         
         self.__cl_program = cl.Program( self.__occ.CL_context , self.__euler_prg ).build()
+        self.__euler_kernel = cl.Kernel( self.__cl_program , "euler" )
         
     
     def __step__( self , dt ):
@@ -85,11 +86,11 @@ class EulerSolverOCL( os.OdeSolver ) :
         self.__occ.A_cla.set( dtype( self.force.A ) , queue=self.__occ.CL_queue )
         self.__occ.X_cla.set( dtype( self.pset.X ) , queue=self.__occ.CL_queue )
         
-        self.__cl_program.euler( self.__occ.CL_queue , ( self.pset.size , ) , None , 
-                                 self.__occ.V_cla.data ,
-                                 self.__occ.A_cla.data , 
-                                 self.__occ.X_cla.data ,
-                                 np.float32( dt ) )
+        self.__euler_kernel( self.__occ.CL_queue , ( self.pset.size , ) , None , 
+                             self.__occ.V_cla.data ,
+                             self.__occ.A_cla.data , 
+                             self.__occ.X_cla.data ,
+                             np.float32( dt ) )
         
         self.__occ.X_cla.get( self.__occ.CL_queue , self.pset.X )
         self.__occ.V_cla.get( self.__occ.CL_queue , self.pset.V )
