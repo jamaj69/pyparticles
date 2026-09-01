@@ -7,6 +7,8 @@
 # (at your option) any later version.
 
 import gc
+import os
+import time
 
 import numpy as np
 
@@ -32,6 +34,21 @@ except ImportError:
     cl = None
 
 
+def _env_true(name):
+    return os.environ.get(name, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _event_seconds(event):
+    if event is None:
+        return 0.0
+    try:
+        return max(0.0, (event.profile.end - event.profile.start) * 1.0e-9)
+    except Exception:
+        return 0.0
+
+
 def default_pos(pset, indx):
     """Historical host fallback for systems without CL/GL sharing."""
     t = default_pos.sim_time.time
@@ -52,6 +69,20 @@ def fountain():
     dt = 0.005
     pcnt = 100000
     ocl_ok = test_pyopencl()
+
+    profile_clgl = _env_true("PYPARTICLES_PROFILE_CLGL")
+    try:
+        profile_frames = max(
+            50, int(os.environ.get("PYPARTICLES_PROFILE_FRAMES", "1000"))
+        )
+    except ValueError:
+        profile_frames = 1000
+    try:
+        profile_warmup = max(
+            0, int(os.environ.get("PYPARTICLES_PROFILE_WARMUP", "200"))
+        )
+    except ValueError:
+        profile_warmup = 200
 
     if ocl_ok:
         print("OpenCL is installed and enabled")
@@ -166,9 +197,121 @@ def fountain():
                 # kernels have been created successfully.
                 animation.ode_solver = shared_solver
                 pset.set_boundary(None)  # boundary/reset is fused on the GPU
-                animation.set_post_step_callback(
-                    lambda _animation: bridge.update_from_device()
-                )
+
+                if profile_clgl:
+                    metric_names = (
+                        "frame_wall_s",
+                        "physics_gpu_s",
+                        "gl_finish_wall_s",
+                        "acquire_gpu_s",
+                        "copy_gpu_s",
+                        "release_gpu_s",
+                        "release_wait_wall_s",
+                        "bridge_wall_s",
+                        "draw_submit_cpu_s",
+                    )
+                    profile_state = {
+                        "seen": 0,
+                        "last_bridge_end": None,
+                        "samples": {name: [] for name in metric_names},
+                    }
+
+                    def emit_profile(force=False):
+                        samples = profile_state["samples"]
+                        count = len(samples["frame_wall_s"])
+                        if count == 0:
+                            return
+                        if not force and count < profile_frames:
+                            return
+
+                        avg = {
+                            name: float(np.mean(values)) if values else 0.0
+                            for name, values in samples.items()
+                        }
+                        frame_ms = avg["frame_wall_s"] * 1000.0
+                        fps = 1.0 / avg["frame_wall_s"] if avg["frame_wall_s"] else 0.0
+                        p95_ms = float(
+                            np.percentile(samples["frame_wall_s"], 95)
+                        ) * 1000.0
+                        copy_bw = 0.0
+                        if avg["copy_gpu_s"] > 0.0:
+                            copy_bw = (
+                                pset.size * pset.dim * np.dtype(np.float32).itemsize
+                                / avg["copy_gpu_s"]
+                                / (1024.0 ** 3)
+                            )
+
+                        print("")
+                        print(
+                            "=== CL/GL profile: %d frames, %d particles ==="
+                            % (count, pset.size)
+                        )
+                        print("frame wall avg       : %8.3f ms  (%7.1f FPS)" % (frame_ms, fps))
+                        print("frame wall p95       : %8.3f ms" % p95_ms)
+                        print("physics fused GPU    : %8.3f ms" % (avg["physics_gpu_s"] * 1000.0))
+                        print("glFinish wait wall   : %8.3f ms" % (avg["gl_finish_wall_s"] * 1000.0))
+                        print("CL acquire GPU       : %8.3f ms" % (avg["acquire_gpu_s"] * 1000.0))
+                        print("X -> VBO copy GPU    : %8.3f ms  (%6.2f GiB/s)" % (
+                            avg["copy_gpu_s"] * 1000.0, copy_bw
+                        ))
+                        print("CL release GPU       : %8.3f ms" % (avg["release_gpu_s"] * 1000.0))
+                        print("release.wait wall    : %8.3f ms" % (avg["release_wait_wall_s"] * 1000.0))
+                        print("CL/GL bridge wall    : %8.3f ms" % (avg["bridge_wall_s"] * 1000.0))
+                        print("glDrawArrays submit  : %8.3f ms CPU" % (
+                            avg["draw_submit_cpu_s"] * 1000.0
+                        ))
+                        print(
+                            "note: GPU event times and wall waits overlap; "
+                            "do not add these rows."
+                        )
+                        print("")
+
+                        for values in samples.values():
+                            values[:] = []
+
+                    def profiled_bridge_update(_animation):
+                        bridge.update_from_device()
+                        bridge_end = time.perf_counter()
+
+                        last_end = profile_state["last_bridge_end"]
+                        profile_state["last_bridge_end"] = bridge_end
+                        profile_state["seen"] += 1
+                        if last_end is None:
+                            return
+                        if profile_state["seen"] <= profile_warmup:
+                            return
+
+                        bp = bridge.last_profile
+                        samples = profile_state["samples"]
+                        samples["frame_wall_s"].append(bridge_end - last_end)
+                        samples["physics_gpu_s"].append(
+                            _event_seconds(shared_force.last_step_event)
+                        )
+                        for name in (
+                            "gl_finish_wall_s",
+                            "acquire_gpu_s",
+                            "copy_gpu_s",
+                            "release_gpu_s",
+                            "release_wait_wall_s",
+                            "bridge_wall_s",
+                        ):
+                            samples[name].append(float(bp.get(name, 0.0)))
+                        samples["draw_submit_cpu_s"].append(
+                            float(animation.draw_particles.last_draw_submit_seconds)
+                        )
+                        emit_profile(force=False)
+
+                    animation.set_post_step_callback(profiled_bridge_update)
+                    print(
+                        "CL/GL profiling enabled: warmup=%d, report every %d frames"
+                        % (profile_warmup, profile_frames)
+                    )
+                else:
+                    profile_state = None
+                    emit_profile = None
+                    animation.set_post_step_callback(
+                        lambda _animation: bridge.update_from_device()
+                    )
 
                 def cleanup_interop(_animation, _bridge=bridge, _fallback=solver):
                     # Drop every reference chain leading to the GL-sharing
@@ -176,6 +319,8 @@ def fountain():
                     # NVIDIA driver, leaving shared_solver alive until after
                     # glutLeaveMainLoop() can crash native teardown.
                     _animation.set_post_step_callback(None)
+                    if profile_clgl and emit_profile is not None:
+                        emit_profile(force=True)
                     _bridge.close()
                     _animation.ode_solver = _fallback
                     gc.collect()
