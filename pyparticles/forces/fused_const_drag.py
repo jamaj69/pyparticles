@@ -21,6 +21,11 @@ class FusedConstDragOCL(fr.Force):
     the same kernel launch.  The reset follows the original demo's probability
     distributions but uses a small deterministic device-side hash PRNG, so no
     boundary detection or random state needs to cross PCIe.
+
+    A fountain solver may optionally set a one-shot render target.  In that
+    mode a dedicated kernel writes the final positions both to canonical ``X``
+    and to the supplied OpenCL buffer in the same pass.  This is used by the
+    experimental CL/GL path to eliminate a separate X -> VBO device copy.
     """
 
     def __init__(
@@ -52,6 +57,8 @@ class FusedConstDragOCL(fr.Force):
         self.__M = np.zeros((size, 1), dtype=self.__dtype)
         self.__fountain_bounds = None
         self.__last_step_event = None
+        self.__render_target = None
+        self.__render_wait_for = None
         if fountain_bounds is not None:
             bounds = np.asarray(fountain_bounds, dtype=self.__dtype).reshape(-1)
             if bounds.size != 6:
@@ -207,12 +214,82 @@ class FusedConstDragOCL(fr.Force):
             X[i0+1] = x.y;
             X[i0+2] = x.z;
         }
+
+        __kernel void const_drag_euler_fountain_render(
+            __global       float *V,
+            __global const float *M,
+                           float  cax,
+                           float  cay,
+                           float  caz,
+                           float  K,
+                           float  dt,
+                           float  sim_time,
+                            uint  step,
+                           float  xmin,
+                           float  xmax,
+                           float  ymin,
+                           float  ymax,
+                           float  zmin,
+                           float  zmax,
+            __global       float *X,
+            __global       float *render_X)
+        {
+            int i = get_global_id(0);
+            int i0 = 3*i;
+
+            float3 x = (float3)(X[i0], X[i0+1], X[i0+2]);
+            float3 v = (float3)(V[i0], V[i0+1], V[i0+2]);
+            float3 ca = (float3)(cax, cay, caz);
+            float3 a = const_drag_accel(v, M[i], ca, K);
+
+            v += a * dt;
+            x += v * dt;
+
+            int outside = (
+                x.x < xmin || x.x > xmax ||
+                x.y < ymin || x.y > ymax ||
+                x.z < zmin || x.z > zmax
+            );
+
+            if (outside)
+            {
+                uint seed = ((uint)i + 1u) * 747796405u ^ (step + 1u) * 2891336453u;
+                float rx = random01(seed ^ 0x68bc21ebu);
+                float ry = random01(seed ^ 0x02e5be93u);
+                float rz = random01(seed ^ 0x967a889bu);
+                float ra = random01(seed ^ 0x4f1bbcdcu);
+                float rv = random01(seed ^ 0x85ebca6bu);
+
+                x = (float3)(0.01f*rx, 0.01f*ry, 0.01f*rz);
+
+                float fs = 1.0f / (1.0f + exp(-(sim_time*4.0f - 2.0f)));
+                float alpha = 6.2831853071795864769f * ra;
+                v.x = 2.0f * fs * cos(alpha);
+                v.y = 2.0f * fs * sin(alpha);
+                v.z = 10.0f * fs + fs * rv;
+            }
+
+            V[i0]   = v.x;
+            V[i0+1] = v.y;
+            V[i0+2] = v.z;
+
+            X[i0]   = x.x;
+            X[i0+1] = x.y;
+            X[i0+2] = x.z;
+
+            render_X[i0]   = x.x;
+            render_X[i0+1] = x.y;
+            render_X[i0+2] = x.z;
+        }
         """
         self.__program = cl.Program(self.__occ.CL_context, source).build()
         self.__force_kernel = cl.Kernel(self.__program, "const_drag_force")
         self.__euler_kernel = cl.Kernel(self.__program, "const_drag_euler")
         self.__fountain_kernel = cl.Kernel(
             self.__program, "const_drag_euler_fountain"
+        )
+        self.__fountain_render_kernel = cl.Kernel(
+            self.__program, "const_drag_euler_fountain_render"
         )
 
     def set_masses(self, m):
@@ -226,6 +303,25 @@ class FusedConstDragOCL(fr.Force):
             self.__dtype(self.__UF[2]),
             self.__K,
         )
+
+    def set_render_target(self, buffer, wait_for=None):
+        """Mirror the next fountain step's final X values into *buffer*.
+
+        The target is one-shot and is cleared as soon as the next step is
+        enqueued.  ``wait_for`` may contain an OpenCL GL-acquire event so the
+        kernel cannot write the shared object before OpenCL owns it.
+        """
+        if self.__fountain_bounds is None:
+            raise RuntimeError("A render target is supported only in fountain mode")
+        if buffer is None:
+            self.clear_render_target()
+            return
+        self.__render_target = buffer
+        self.__render_wait_for = None if wait_for is None else list(wait_for)
+
+    def clear_render_target(self):
+        self.__render_target = None
+        self.__render_wait_for = None
 
     def update_force_device(self, pset, accumulate=False, host_authoritative=False):
         if host_authoritative:
@@ -269,10 +365,11 @@ class FusedConstDragOCL(fr.Force):
             )
         else:
             b = self.__fountain_bounds
-            self.__last_step_event = self.__fountain_kernel(
-                self.__occ.CL_queue,
-                (self.__size,),
-                None,
+            render_target = self.__render_target
+            render_wait_for = self.__render_wait_for
+            self.clear_render_target()
+
+            args = (
                 self.__occ.V_cla.data,
                 self.__occ.M_cla.data,
                 cax,
@@ -290,6 +387,23 @@ class FusedConstDragOCL(fr.Force):
                 self.__dtype(b[5]),
                 self.__occ.X_cla.data,
             )
+
+            if render_target is None:
+                self.__last_step_event = self.__fountain_kernel(
+                    self.__occ.CL_queue,
+                    (self.__size,),
+                    None,
+                    *args
+                )
+            else:
+                self.__last_step_event = self.__fountain_render_kernel(
+                    self.__occ.CL_queue,
+                    (self.__size,),
+                    None,
+                    *args,
+                    render_target,
+                    wait_for=render_wait_for,
+                )
 
         self.__occ.mark_device_modified("X")
         self.__occ.mark_device_modified("V")
