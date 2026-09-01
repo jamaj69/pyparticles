@@ -88,10 +88,13 @@ class OpenCLGLPositionBuffer(object):
             return
         self.__closed = True
 
+        occ = self.__occ
+
         # Stop any pending CL work touching the shared object, then make sure
         # the last OpenGL draw has also completed before deleting the VBO.
         try:
-            self.__occ.CL_queue.finish()
+            if occ is not None:
+                occ.CL_queue.finish()
         except Exception:
             pass
         try:
@@ -110,17 +113,23 @@ class OpenCLGLPositionBuffer(object):
                 release = getattr(self.__gl_buffer, "release", None)
                 if release is not None:
                     release()
-                self.__gl_buffer = None
         except Exception:
-            self.__gl_buffer = None
+            pass
+        self.__gl_buffer = None
 
         try:
             if self.__vbo:
                 glBindBuffer(GL_ARRAY_BUFFER, 0)
                 glDeleteBuffers(1, [self.__vbo])
-                self.__vbo = 0
         except Exception:
-            self.__vbo = 0
+            pass
+        self.__vbo = 0
+
+        # Crucial for NVIDIA/GLX teardown: do not keep the GL-sharing OpenCL
+        # context alive solely through the bridge after its GL object is gone.
+        self.__occ = None
+        self.__pset = None
+        self.__draw_particles = None
 
     def get_vbo(self):
         return self.__vbo
