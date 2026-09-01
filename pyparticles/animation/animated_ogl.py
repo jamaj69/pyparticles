@@ -40,19 +40,6 @@ if sys.platform.startswith("linux") :
     from OpenGL.GLX import *
  
 
-def _leave_main_loop():
-    """Leave the FreeGLUT loop when available, otherwise exit Python."""
-    leave = globals().get("glutLeaveMainLoop")
-    if leave is not None:
-        try:
-            if bool(leave):
-                leave()
-                return
-        except Exception:
-            pass
-    raise SystemExit(0)
-
-
 def InitGL( Width , Height , ReSizeFun ):
     """
     Initialize OpenGl 
@@ -217,14 +204,7 @@ def ReSizeGLScene(Width, Height):
     SetPerspective( MousePressed.animation )
     
    
-def KeyPressed( c , x , y ):
-    if isinstance(c, bytes):
-        c = c.decode("latin-1")
-
-    if c in ("q", "Q", "\x1b"):
-        _leave_main_loop()
-        return
-
+def KeyPressed( c , x , y ):    
     if c == 'a' :
         KeyPressed.animation.view_axis = not KeyPressed.animation.view_axis
         
@@ -253,9 +233,10 @@ def KeyPressed( c , x , y ):
         KeyPressed.animation.light = False
         
     if c == 'v' :
-        KeyPressed.animation.draw_vector_field = ( not KeyPressed.animation.draw_vector_field ) and ( KeyPressed.animation.vector_field is not None )
+        KeyPressed.animation.draw_vector_field = ( not KeyPressed.animation.draw_vector_field ) and ( KeyPressed.animation.vector_field != None )
         
         
+
 
 def MousePressed(  button , state , x , y ):
     #print ("--------------------")
@@ -349,9 +330,6 @@ def print_help():
     y -= 0.05
     glut_print( 0.1 , y , GLUT_BITMAP_9_BY_15 , "f: Toggle FPS " , 1 , 1 , 1 , 1 )
     
-    y -= 0.05
-    glut_print( 0.1 , y , GLUT_BITMAP_9_BY_15 , "q / Esc: Quit" , 1 , 1 , 1 , 1 )
-
     y -= 0.1    
     glut_print( 0.1 , y , GLUT_BITMAP_9_BY_15 , "h: Toggle help message" , 1 , 1 , 1 , 1 )
     
@@ -563,7 +541,7 @@ class AnimatedGl( pan.Animation ):
     
     def get_trajectory( self ) :
         return super(AnimatedGl,self).get_trajectory()
-        
+    
     def set_trajectory( self , tr ):
         super(AnimatedGl,self).set_trajectory( tr )
         self.draw_particles.trajectory = tr
@@ -573,7 +551,7 @@ class AnimatedGl( pan.Animation ):
     
     def get_trajectory_step( self ) :
         return super(AnimatedGl,self).get_rajectory_step()
-        
+    
     def set_trajectory_step( self , trs ):
         super(AnimatedGl,self).set_trajectory_step( trs )
         self.draw_particles.set_trajectory_step( trs )
@@ -592,7 +570,7 @@ class AnimatedGl( pan.Animation ):
     
     def add_vector_field_fun( self , fun ,  unit , density=1.0 , color_fun=None ):
         
-        if self.vector_field is None :
+        if self.vector_field == None :
             
             lims = [ self.xlim[0] , self.xlim[1] , self.ylim[0] , self.ylim[1] , self.zlim[0] , self.zlim[1] ]
             
@@ -622,28 +600,17 @@ class AnimatedGl( pan.Animation ):
         
         ReSizeGLScene( w , h )
         
+    
     def build_animation(self):
         self.__window = None
         
         glutInit(sys.argv)
-
-        # FreeGLUT can be configured to return instead of terminating the
-        # process when the user closes the window.
-        set_option = globals().get("glutSetOption")
-        action_on_close = globals().get("GLUT_ACTION_ON_WINDOW_CLOSE")
-        action_returns = globals().get("GLUT_ACTION_GLUTMAINLOOP_RETURNS")
-        if set_option is not None and action_on_close is not None and action_returns is not None:
-            try:
-                if bool(set_option):
-                    set_option(action_on_close, action_returns)
-            except Exception:
-                pass
         
         glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_DEPTH | GLUT_MULTISAMPLE)
         glutInitWindowSize( self.win_size[0] , self.win_size[1] )
         glutInitWindowPosition(20, 20)
         
-        self.__window = glutCreateWindow( b"Particles" )
+        self.__window = glutCreateWindow( ctypes.c_char_p( b"Particles" ) )
         
         DGLS = DrawGLScene
         
@@ -695,7 +662,7 @@ class AnimatedGl( pan.Animation ):
             self.rot_matrix = glGetFloatv( GL_MODELVIEW_MATRIX )
             glPopMatrix()
             
-        if self.vector_field is not None :
+        if self.vector_field != None :
             self.vector_field.ogl_init()
         
         try :            
@@ -717,10 +684,8 @@ class AnimatedGl( pan.Animation ):
         
     
     def start(self):
-        try:
-            glutMainLoop()
-        except KeyboardInterrupt:
-            _leave_main_loop()
+        glutMainLoop()
     
+
 
 
