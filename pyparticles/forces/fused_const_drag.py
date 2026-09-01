@@ -51,6 +51,7 @@ class FusedConstDragOCL(fr.Force):
         self.__A = np.zeros((size, dim), dtype=self.__dtype)
         self.__M = np.zeros((size, 1), dtype=self.__dtype)
         self.__fountain_bounds = None
+        self.__last_step_event = None
         if fountain_bounds is not None:
             bounds = np.asarray(fountain_bounds, dtype=self.__dtype).reshape(-1)
             if bounds.size != 6:
@@ -253,7 +254,7 @@ class FusedConstDragOCL(fr.Force):
         cax, cay, caz, drag_const = self._common_args()
 
         if self.__fountain_bounds is None:
-            self.__euler_kernel(
+            self.__last_step_event = self.__euler_kernel(
                 self.__occ.CL_queue,
                 (self.__size,),
                 None,
@@ -268,7 +269,7 @@ class FusedConstDragOCL(fr.Force):
             )
         else:
             b = self.__fountain_bounds
-            self.__fountain_kernel(
+            self.__last_step_event = self.__fountain_kernel(
                 self.__occ.CL_queue,
                 (self.__size,),
                 None,
@@ -322,3 +323,9 @@ class FusedConstDragOCL(fr.Force):
         return tuple(float(value) for value in self.__fountain_bounds)
 
     fountain_bounds = property(get_fountain_bounds)
+
+    def get_last_step_event(self):
+        """Return the most recently enqueued fused Euler OpenCL event."""
+        return self.__last_step_event
+
+    last_step_event = property(get_last_step_event)
