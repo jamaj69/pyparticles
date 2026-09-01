@@ -104,6 +104,7 @@ def fountain():
     ocl_ok = test_pyopencl()
 
     profile_clgl = _env_true("PYPARTICLES_PROFILE_CLGL")
+    fused_mirror = _env_true("PYPARTICLES_CLGL_FUSED_MIRROR")
     try:
         profile_frames = max(
             50, int(os.environ.get("PYPARTICLES_PROFILE_FRAMES", "1000"))
@@ -236,6 +237,23 @@ def fountain():
                 animation.ode_solver = shared_solver
                 pset.set_boundary(None)
 
+                if fused_mirror:
+                    def prepare_fused_render(_animation):
+                        render_buffer, acquire = bridge.prepare_fused_render()
+                        shared_force.set_render_target(
+                            render_buffer, wait_for=[acquire]
+                        )
+
+                    animation.set_pre_step_callback(prepare_fused_render)
+                else:
+                    animation.set_pre_step_callback(None)
+
+                def complete_bridge_update():
+                    if fused_mirror:
+                        bridge.finish_fused_render(shared_force.last_step_event)
+                    else:
+                        bridge.update_from_device()
+
                 if profile_clgl:
                     animation.draw_particles.set_gpu_timing_enabled(True)
 
@@ -356,7 +374,7 @@ def fountain():
                         # checks QUERY_RESULT_AVAILABLE first and never waits.
                         ready_gl_draws = animation.draw_particles.drain_gpu_draw_times()
 
-                        bridge.update_from_device()
+                        complete_bridge_update()
                         bridge_end = time.perf_counter()
 
                         last_end = profile_state["last_bridge_end"]
@@ -412,11 +430,13 @@ def fountain():
                     profile_state = None
                     emit_profile = None
                     animation.set_post_step_callback(
-                        lambda _animation: bridge.update_from_device()
+                        lambda _animation: complete_bridge_update()
                     )
 
                 def cleanup_interop(_animation, _bridge=bridge, _fallback=solver):
+                    _animation.set_pre_step_callback(None)
                     _animation.set_post_step_callback(None)
+                    shared_force.clear_render_target()
                     if profile_clgl and emit_profile is not None:
                         # Collect only already-available timer results.  Cleanup
                         # must not block merely to improve profiling statistics.
@@ -436,6 +456,10 @@ def fountain():
                     "positions render without host copies"
                 )
                 print("CL/GL sync: double-buffered VBOs with per-buffer GL fences")
+                if fused_mirror:
+                    print("CL/GL position path: fused kernel mirror (experimental)")
+                else:
+                    print("CL/GL position path: X -> VBO device copy (stable)")
                 print("Interop device:", shared_ctx.device.name)
             except Exception as exc:
                 if bridge is not None:
