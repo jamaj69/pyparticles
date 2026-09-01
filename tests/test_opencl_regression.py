@@ -2,9 +2,10 @@ import unittest
 
 import numpy as np
 
-from pyparticles.forces.const_force import ConstForce
+from pyparticles.forces.const_force import ConstForce, ConstForceOCL
 from pyparticles.forces.drag import Drag, DragOCL
-from pyparticles.forces.multiple_force import MultipleForce
+from pyparticles.forces.gravity import GravityOCL
+from pyparticles.forces.multiple_force import MultipleForce, MultipleForceOCL
 from pyparticles.ode.euler_solver import EulerSolver, EulerSolverOCL
 from pyparticles.pset.opencl_context import (
     OCLC_A,
@@ -107,9 +108,14 @@ class OpenCLRegressionTests(unittest.TestCase):
             OCLC_X | OCLC_V | OCLC_A | OCLC_M,
             dtype=np.float32,
         )
-        grav_gpu = ConstForce(n, dim=3, u_force=(0.0, 0.0, -10.0))
+        grav_gpu = ConstForceOCL(
+            n,
+            dim=3,
+            u_force=(0.0, 0.0, -10.0),
+            ocl_context=ctx,
+        )
         drag_gpu = DragOCL(n, dim=3, Consts=0.01, ocl_context=ctx)
-        force_gpu = MultipleForce(n, dim=3)
+        force_gpu = MultipleForceOCL(n, dim=3, ocl_context=ctx)
         force_gpu.append_force(grav_gpu)
         force_gpu.append_force(drag_gpu)
         force_gpu.set_masses(p_gpu.M)
@@ -121,6 +127,75 @@ class OpenCLRegressionTests(unittest.TestCase):
 
         np.testing.assert_allclose(p_gpu.X, p_cpu.X, rtol=1e-4, atol=1e-4)
         np.testing.assert_allclose(p_gpu.V, p_cpu.V, rtol=1e-4, atol=1e-4)
+
+    def test_resident_fountain_pipeline_avoids_hot_path_uploads(self):
+        n = 128
+        dt = 0.005
+        pset = ParticlesSet(n, dtype=np.float32)
+        pset.X[:] = self.rng.normal(size=(n, 3)).astype(np.float32)
+        pset.V[:] = self.rng.normal(size=(n, 3)).astype(np.float32)
+        pset.M[:] = 0.1
+
+        ctx = OpenCLcontext(n, 3, OCLC_X | OCLC_V | OCLC_A | OCLC_M)
+        grav = ConstForceOCL(n, u_force=(0.0, 0.0, -10.0), ocl_context=ctx)
+        drag = DragOCL(n, Consts=0.01, ocl_context=ctx)
+        force = MultipleForceOCL(n, ocl_context=ctx)
+        force.append_force(grav)
+        force.append_force(drag)
+        force.set_masses(pset.M)
+        solver = EulerSolverOCL(force, pset, dt, ocl_context=ctx)
+
+        # Preload the initial state, then measure only the steady-state hot path.
+        ctx.set_from_host("X", pset.X)
+        ctx.set_from_host("V", pset.V)
+        ctx.reset_transfer_stats()
+
+        solver.step()
+        solver.step()
+
+        stats = ctx.transfer_stats
+        self.assertEqual(stats["h2d_calls"], 0)
+        self.assertEqual(stats["by_buffer"]["A"]["h2d_calls"], 0)
+        self.assertEqual(stats["by_buffer"]["A"]["d2h_calls"], 0)
+        self.assertEqual(stats["by_buffer"]["X"]["d2h_calls"], 2)
+        self.assertEqual(stats["by_buffer"]["V"]["d2h_calls"], 2)
+
+    def test_galaxy_mode_copies_only_positions_to_host(self):
+        n = 32
+        dt = 0.01
+        pset = ParticlesSet(n, dtype=np.float32)
+        pset.X[:] = self.rng.normal(0.0, 1.0, size=(n, 3)).astype(np.float32)
+        pset.V[:] = self.rng.normal(0.0, 0.1, size=(n, 3)).astype(np.float32)
+        pset.M[:] = self.rng.uniform(0.5, 2.0, size=(n, 1)).astype(np.float32)
+
+        ctx = OpenCLcontext(n, 3, OCLC_X | OCLC_V | OCLC_A | OCLC_M)
+        force = GravityOCL(n, Consts=1e-4, ocl_context=ctx)
+        force.set_masses(pset.M)
+        solver = EulerSolverOCL(
+            force,
+            pset,
+            dt,
+            ocl_context=ctx,
+            sync_velocity=False,
+        )
+
+        ctx.set_from_host("X", pset.X)
+        ctx.set_from_host("V", pset.V)
+        ctx.reset_transfer_stats()
+
+        solver.step()
+        solver.step()
+
+        stats = ctx.transfer_stats
+        self.assertEqual(stats["h2d_calls"], 0)
+        self.assertEqual(stats["d2h_calls"], 2)
+        self.assertEqual(stats["by_buffer"]["X"]["d2h_calls"], 2)
+        self.assertEqual(stats["by_buffer"]["V"]["d2h_calls"], 0)
+        self.assertEqual(stats["by_buffer"]["A"]["d2h_calls"], 0)
+
+        # Explicit synchronization remains available for host consumers.
+        solver.sync_to_host(velocity=True)
+        self.assertEqual(ctx.transfer_stats["by_buffer"]["V"]["d2h_calls"], 1)
 
 
 if __name__ == "__main__":
