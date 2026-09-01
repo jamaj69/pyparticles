@@ -26,45 +26,43 @@ except ImportError as exc:
     _PYOPENCL_IMPORT_ERROR = exc
 else:
     _PYOPENCL_IMPORT_ERROR = None
-    
 
-OCLC_X = np.uint8( 0b10000000 )
-OCLC_V = np.uint8( 0b01000000 )
-OCLC_A = np.uint8( 0b00100000 ) 
-OCLC_M = np.uint8( 0b00010000 )
 
-class OpenCLcontext( object ):
+OCLC_X = np.uint8(0b10000000)
+OCLC_V = np.uint8(0b01000000)
+OCLC_A = np.uint8(0b00100000)
+OCLC_M = np.uint8(0b00010000)
+
+
+class OpenCLcontext(object):
+    """Shared OpenCL context and particle buffers.
+
+    Besides owning the OpenCL arrays, the modern implementation tracks which
+    side currently contains the newest value for X/V/A/M.  This allows forces
+    and integrators sharing one context to avoid uploading a buffer that is
+    already current on the device.
+
+    Buffer state is one of:
+
+    ``host``
+        The host NumPy array is authoritative and must be uploaded before a
+        device consumer uses it.
+    ``device``
+        The OpenCL array is authoritative and must be downloaded before a host
+        consumer uses it.
+    ``sync``
+        Host and device contain the same value.
     """
-    Create a working context for PyOpenCL.
-        This class build a single opencl context and a command queue, that should be shared between the different method or algorithms. 
-        We can also use this class for minimizing  the data transfer between the main RAM and the GPU RAM or for sharing some TMP array.
-        
-    The Array used in this class are the ones defined in the pyopencl package: http://documen.tician.de/pyopencl/array.html#the-array-class 
-        
-        Constructor
-        
-        :param size: the size of the particles set
-        :param dim: The dimension of the system
-        :param mask: ( OCLC_X | OCLC_V | OCLC_A | OCLC_M ) setup the indicated arrays 
-            *. OCLC_X: Position array
-            *. OCLC_V: Velocity array
-            *. OCLC_A: Acceleration array
-            *. OCLC_M: Mass array
-        :param dtype: the floating point type (at the moment I support only np.float32 !! )
-        
-        Example: ::
-            
-            # Share the same context between gravity and the Euler Solver
-            
-            import pyparticles.ode.euler_solver as els
-            import pyparticles.forces.gravity as gr
-            import pyparticles.pset.opencl_context as occ 
-            
-            occx = occ.OpenCLcontext(  pset.size , pset.dim , (occ.OCLC_X|occ.OCLC_V|occ.OCLC_A|occ.OCLC_M) )
-            grav = gr.GravityOCL( pset.size , Consts=G , ocl_context=occx  )
-            solver = els.EulerSolverOCL( grav , pset , dt , ocl_context=occx )
-    """
-    def __init__( self , size , dim , mask=( OCLC_X | OCLC_V | OCLC_A | OCLC_M ) , dtype=np.float32 ):
+
+    _VALID_NAMES = ("X", "V", "A", "M")
+
+    def __init__(
+        self,
+        size,
+        dim,
+        mask=(OCLC_X | OCLC_V | OCLC_A | OCLC_M),
+        dtype=np.float32,
+    ):
         if cl is None:
             raise RuntimeError("PyOpenCL is not available") from _PYOPENCL_IMPORT_ERROR
 
@@ -75,11 +73,9 @@ class OpenCLcontext( object ):
         self.__dtype = np_dtype.type
         self.__size = int(size)
         self.__dim = int(dim)
-        self.__opt_arrays = dict()
+        self.__opt_arrays = {}
 
         try:
-            # Non-interactive selection still honours PYOPENCL_CTX when set and
-            # avoids blocking applications on stdin when only one choice exists.
             self.__cl_context = cl.create_some_context(interactive=False)
         except Exception as exc:
             raise RuntimeError("No usable OpenCL context could be created") from exc
@@ -88,104 +84,176 @@ class OpenCLcontext( object ):
             self.__cl_context,
             properties=cl.command_queue_properties.PROFILING_ENABLE,
         )
-        
-        if mask & OCLC_V :
-            self.__V_cla = cla.Array( self.__cl_queue , ( self.__size , self.__dim ) , self.__dtype )
-        else :
-            self.__V_cla = None
 
-        if mask & OCLC_X :
-            self.__X_cla = cla.Array( self.__cl_queue , ( self.__size , self.__dim ) , self.__dtype )
-        else :
-            self.__X_cla = None
+        self.__V_cla = self._new_array((self.__size, self.__dim)) if mask & OCLC_V else None
+        self.__X_cla = self._new_array((self.__size, self.__dim)) if mask & OCLC_X else None
+        self.__A_cla = self._new_array((self.__size, self.__dim)) if mask & OCLC_A else None
+        self.__M_cla = self._new_array((self.__size, 1)) if mask & OCLC_M else None
 
-        if mask & OCLC_A :
-            self.__A_cla = cla.Array( self.__cl_queue , ( self.__size , self.__dim ) , self.__dtype )
-        else :
-            self.__A_cla = None
+        # At construction the corresponding particle arrays live on the host.
+        # Device storage is allocated but not initialized from those arrays yet.
+        self.__buffer_state = {
+            "X": "host" if self.__X_cla is not None else None,
+            "V": "host" if self.__V_cla is not None else None,
+            "A": "host" if self.__A_cla is not None else None,
+            "M": "host" if self.__M_cla is not None else None,
+        }
+        self.reset_transfer_stats()
 
-        if mask & OCLC_M :
-            self.__M_cla = cla.Array( self.__cl_queue , ( self.__size , 1 ) , self.__dtype )
-        else :
-            self.__M_cla = None
-                                    
+    def _new_array(self, shape, dtype=None):
+        if dtype is None:
+            dtype = self.__dtype
+        return cla.Array(self.__cl_queue, shape, np.dtype(dtype).type)
+
+    def _array_for_name(self, name):
+        name = str(name).upper()
+        arrays = {
+            "X": self.__X_cla,
+            "V": self.__V_cla,
+            "A": self.__A_cla,
+            "M": self.__M_cla,
+        }
+        if name not in arrays:
+            raise KeyError("Unknown OpenCL particle buffer %r" % name)
+        array = arrays[name]
+        if array is None:
+            raise ValueError("OpenCL particle buffer %s was not allocated" % name)
+        return name, array
+
+    def _record_transfer(self, direction, name, nbytes):
+        self.__transfer_stats[direction + "_calls"] += 1
+        self.__transfer_stats[direction + "_bytes"] += int(nbytes)
+        self.__transfer_stats["by_buffer"][name][direction + "_calls"] += 1
+        self.__transfer_stats["by_buffer"][name][direction + "_bytes"] += int(nbytes)
+
+    def reset_transfer_stats(self):
+        self.__transfer_stats = {
+            "h2d_calls": 0,
+            "d2h_calls": 0,
+            "h2d_bytes": 0,
+            "d2h_bytes": 0,
+            "by_buffer": {
+                name: {
+                    "h2d_calls": 0,
+                    "d2h_calls": 0,
+                    "h2d_bytes": 0,
+                    "d2h_bytes": 0,
+                }
+                for name in self._VALID_NAMES
+            },
+        }
+
+    def get_transfer_stats(self):
+        return {
+            "h2d_calls": self.__transfer_stats["h2d_calls"],
+            "d2h_calls": self.__transfer_stats["d2h_calls"],
+            "h2d_bytes": self.__transfer_stats["h2d_bytes"],
+            "d2h_bytes": self.__transfer_stats["d2h_bytes"],
+            "by_buffer": {
+                name: dict(values)
+                for name, values in self.__transfer_stats["by_buffer"].items()
+            },
+        }
+
+    transfer_stats = property(get_transfer_stats)
+
+    def get_buffer_state(self, name):
+        name, _ = self._array_for_name(name)
+        return self.__buffer_state[name]
+
+    def mark_host_modified(self, name):
+        name, _ = self._array_for_name(name)
+        self.__buffer_state[name] = "host"
+
+    def mark_device_modified(self, name):
+        name, _ = self._array_for_name(name)
+        self.__buffer_state[name] = "device"
+
+    def mark_synced(self, name):
+        name, _ = self._array_for_name(name)
+        self.__buffer_state[name] = "sync"
+
+    def sync_to_device(self, name, host_array):
+        """Upload *host_array* only when the host contains the newest value."""
+        name, device_array = self._array_for_name(name)
+        if self.__buffer_state[name] == "host":
+            host = np.ascontiguousarray(host_array, dtype=device_array.dtype)
+            device_array.set(host, queue=self.__cl_queue)
+            self._record_transfer("h2d", name, host.nbytes)
+            self.__buffer_state[name] = "sync"
+        return device_array
+
+    def sync_to_host(self, name, host_array):
+        """Download a device buffer only when the device contains newer data."""
+        name, device_array = self._array_for_name(name)
+        if self.__buffer_state[name] == "device":
+            device_array.get(queue=self.__cl_queue, ary=host_array)
+            self._record_transfer("d2h", name, np.asarray(host_array).nbytes)
+            self.__buffer_state[name] = "sync"
+        return host_array
+
+    def set_from_host(self, name, host_array):
+        """Declare the host authoritative and synchronize it to the device."""
+        self.mark_host_modified(name)
+        return self.sync_to_device(name, host_array)
+
+    def add_array_by_name(self, key, size=None, dim=None, dtype=None):
+        if dim is None:
+            dim = self.__dim
+        if size is None:
+            size = self.__size
+        if dtype is None:
+            dtype = self.dtype
+
+        self.__opt_arrays[key] = self._new_array(
+            (int(size), int(dim)),
+            dtype=np.dtype(dtype).type,
+        )
+
+    def get_by_name(self, key):
+        return self.__opt_arrays[key]
 
     def get_dtype(self):
         return self.__dtype
-    
-    dtype = property( get_dtype , doc="return the dtype of the context" )
-    
-    
-    def add_array_by_name( self , key , size=None , dim=None , dtype=None ):
-        """
-        Add a new array by name.
-        
-        :param key: The key (or name) of the new array
-        :param size: (Default: current) The size of the new array, if not specified by default it uses the current size
-        :param dim: (Default: current) The dim of the new array, if not specified by default it uses the current dim 
-        :param dtype: (Dafault: current) The dtype of the new array, if not specified by default it uses the context dtype
-        """
-        
-        if dim is None :
-            dim = self.__dim        
-        
-        if size is None :
-            size = self.__size
-            
-        if dtype is None :
-            dtype = self.dtype 
 
-        np_dtype = np.dtype(dtype)
-        if np_dtype != np.dtype(np.float32):
-            raise TypeError("PyParticles OpenCL kernels currently support only float32")
-            
-        self.__opt_arrays[key] = cla.Array(
-            self.__cl_queue,
-            ( int(size), int(dim) ),
-            dtype=np_dtype.type,
-        )
-    
-        
-    def get_by_name( self , key ):
-        """
-        Return the array named "key"
-        """
-        return self.__opt_arrays[key]
-    
-    
+    dtype = property(get_dtype, doc="return the dtype of the context")
+
+    def get_size(self):
+        return self.__size
+
+    size = property(get_size)
+
+    def get_dim(self):
+        return self.__dim
+
+    dim = property(get_dim)
+
     def get_CL_context(self):
         return self.__cl_context
-    
-    CL_context = property( get_CL_context , doc="return the opencl context")
-    
-    
+
+    CL_context = property(get_CL_context, doc="return the opencl context")
+
     def get_CL_queue(self):
         return self.__cl_queue
-        
-    CL_queue = property( get_CL_queue , doc="return the command queue" )
-    
-        
+
+    CL_queue = property(get_CL_queue, doc="return the command queue")
+
     def get_X_cla(self):
         return self.__X_cla
-    
-    X_cla = property( get_X_cla , doc="return the positions array" )
-    
-    
+
+    X_cla = property(get_X_cla, doc="return the positions array")
+
     def get_A_cla(self):
         return self.__A_cla
-    
-    A_cla = property( get_A_cla , doc="return the acceleration array" )
-    
-    
+
+    A_cla = property(get_A_cla, doc="return the acceleration array")
+
     def get_V_cla(self):
         return self.__V_cla
-    
-    V_cla = property( get_V_cla , doc="return the velocity array" )
-    
-    
+
+    V_cla = property(get_V_cla, doc="return the velocity array")
+
     def get_M_cla(self):
         return self.__M_cla
-        
-    M_cla = property( get_M_cla , doc="return the masses array (this is a 1D array)" )
-    
-    
+
+    M_cla = property(get_M_cla, doc="return the masses array")
