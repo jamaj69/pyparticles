@@ -20,6 +20,22 @@ else:
     _PYOPENCL_IMPORT_ERROR = None
 
 
+def get_gl_sharing_context_properties():
+    """Return properties for sharing the currently-active OpenGL context.
+
+    PyOpenCL historically documented this helper at the top-level namespace,
+    while 2026.1.x keeps the implementation in ``pyopencl.tools``.  Support
+    both layouts so the PyParticles compatibility layer works across them.
+    """
+    if cl is None:
+        raise RuntimeError("PyOpenCL is not available") from _PYOPENCL_IMPORT_ERROR
+
+    helper = getattr(cl, "get_gl_sharing_context_properties", None)
+    if helper is None:
+        from pyopencl.tools import get_gl_sharing_context_properties as helper
+    return list(helper())
+
+
 OCLC_X = np.uint8(0b10000000)
 OCLC_V = np.uint8(0b01000000)
 OCLC_A = np.uint8(0b00100000)
@@ -98,7 +114,7 @@ class OpenCLcontext(object):
         if not hasattr(cl, "have_gl") or not cl.have_gl():
             raise RuntimeError("PyOpenCL was built without OpenGL interoperability")
 
-        sharing = list(cl.get_gl_sharing_context_properties())
+        sharing = get_gl_sharing_context_properties()
         last_error = None
         for platform in cl.get_platforms():
             for device in platform.get_devices():
