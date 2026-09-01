@@ -42,13 +42,19 @@ from OpenGL.GL import (
 
 
 def _event_profile_seconds(event):
-    """Return queue and execution phases for a completed OpenCL event."""
+    """Return valid timing phases for a completed OpenCL event.
+
+    NVIDIA's GL acquire/release events may expose ``start``/``end`` while
+    leaving ``queued`` or ``submit`` equal to zero.  Treat unavailable phases
+    as NaN instead of subtracting zero from an absolute device timestamp.
+    """
+    nan = float("nan")
     result = {
-        "queued_to_submit_s": 0.0,
-        "submit_to_start_s": 0.0,
-        "queued_to_start_s": 0.0,
-        "execution_s": 0.0,
-        "queued_to_end_s": 0.0,
+        "queued_to_submit_s": nan,
+        "submit_to_start_s": nan,
+        "queued_to_start_s": nan,
+        "execution_s": nan,
+        "queued_to_end_s": nan,
     }
     if event is None:
         return result
@@ -62,11 +68,16 @@ def _event_profile_seconds(event):
         return result
 
     scale = 1.0e-9
-    result["queued_to_submit_s"] = max(0, submit - queued) * scale
-    result["submit_to_start_s"] = max(0, start - submit) * scale
-    result["queued_to_start_s"] = max(0, start - queued) * scale
-    result["execution_s"] = max(0, end - start) * scale
-    result["queued_to_end_s"] = max(0, end - queued) * scale
+    if queued > 0 and submit >= queued:
+        result["queued_to_submit_s"] = (submit - queued) * scale
+    if submit > 0 and start >= submit:
+        result["submit_to_start_s"] = (start - submit) * scale
+    if queued > 0 and start >= queued:
+        result["queued_to_start_s"] = (start - queued) * scale
+    if start > 0 and end >= start:
+        result["execution_s"] = (end - start) * scale
+    if queued > 0 and end >= queued:
+        result["queued_to_end_s"] = (end - queued) * scale
     return result
 
 
@@ -102,14 +113,14 @@ class OpenCLGLPositionBuffer(object):
             "gl_finish_fallback_wall_s": 0.0,
             "fence_immediate": 1.0,
             "acquire_gpu_s": 0.0,
-            "acquire_queue_s": 0.0,
-            "acquire_total_s": 0.0,
+            "acquire_queue_s": float("nan"),
+            "acquire_total_s": float("nan"),
             "copy_gpu_s": 0.0,
-            "copy_queue_s": 0.0,
-            "copy_total_s": 0.0,
+            "copy_queue_s": float("nan"),
+            "copy_total_s": float("nan"),
             "release_gpu_s": 0.0,
-            "release_queue_s": 0.0,
-            "release_total_s": 0.0,
+            "release_queue_s": float("nan"),
+            "release_total_s": float("nan"),
             "release_wait_wall_s": 0.0,
             "bridge_wall_s": 0.0,
             "vbo_index": 0.0,
@@ -241,8 +252,8 @@ class OpenCLGLPositionBuffer(object):
 
         # Without cl_khr_gl_event, OpenGL must not consume the VBO until the CL
         # release is complete.  Keep this wait so rendering remains correct;
-        # profiling below now exposes whether the delay is queue latency or
-        # actual ownership/copy execution.
+        # profiling below exposes whether the delay is queue latency or actual
+        # ownership/copy execution.
         wait_start = time.perf_counter()
         release.wait()
         wait_end = time.perf_counter()
