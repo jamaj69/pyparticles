@@ -5,178 +5,138 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import numpy as np
-import pyparticles.forces.force as fr
 
-import pyparticles.pset.opencl_context as occ 
+import pyparticles.forces.force as fr
+import pyparticles.pset.opencl_context as occ
 
 try:
     import pyopencl as cl
-except:
-    ___foo = 0
+except ImportError:
+    cl = None
 
 
-class Drag( fr.Force ) :
-    r"""
-    Calculate the forces of resistance. Drag is a force that reacts to the movement with respect to a square law speed. It's commonly used for describing the resistance  of a fluid
+class Drag(fr.Force):
+    """Quadratic drag force."""
 
-    The force is given the equation:
-
-    .. math::
-
-        F_i=-\frac{1}{2}K\dot{X}^2
-
-    Constructor:
-        
-    :param    size:        the number of particles in the system
-    :param    dim:         the dimension of the system
-    :param    m:           a vector containig the masses
-    :param    Const:       the drag factor K
-    """
-
-    def __init__(self , size , dim=3 , m=None , Consts=1.0 ):
-        
-        self.__dim = dim
-        self.__size = size
-        
-        self.__G = np.zeros( ( size , 1 ) )
+    def __init__(self, size, dim=3, m=None, Consts=1.0):
+        self.__dim = int(dim)
+        self.__size = int(size)
+        self.__G = np.zeros((size, 1))
         self.__G[:] = Consts
-        
-        self.__A = np.zeros( ( size , dim ) )
-        self.__F = np.zeros( ( size , dim ) )
-        
-        self.__V = np.zeros( ( size , 1 ) )
-        
-        self.__M = np.zeros( ( size , 1 ) )
-        if m is not None :
-            self.set_masses( m )
-        
-        
-    
-    def set_masses( self , m ):
+        self.__A = np.zeros((size, dim))
+        self.__F = np.zeros((size, dim))
+        self.__V = np.zeros((size, 1))
+        self.__M = np.zeros((size, 1))
+
+        if m is not None:
+            self.set_masses(m)
+
+    def set_masses(self, m):
         self.__M[:] = m
-    
-    
-    def update_force( self , pset ):
-        
-        self.__V.T[:] = np.sqrt( np.sum( pset.V[:]**2 , 1 )  )
-        
-        self.__F[:] =  -1./2. * self.__V[:] * pset.V[:] * self.__G[:]
-        
-        self.__A =  self.__F[:] / self.__M
-        
+
+    def update_force(self, pset):
+        self.__V[:, 0] = np.sqrt(np.sum(pset.V**2, axis=1))
+        self.__F[:] = -0.5 * self.__V * pset.V * self.__G
+        self.__A[:] = self.__F / self.__M
         return self.__A
-    
 
     def getA(self):
         return self.__A
-    A = property( getA )
 
+    A = property(getA)
 
     def getF(self):
-        return self.__A * self.__M[:]
-    F = property( getF )
-    
+        return self.__A * self.__M
 
-    
-########################
-# OpenCL based 
-########################    
-class DragOCL( fr.Force ) :
-    r"""
-    Calculate the forces of resistance. Drag is a force that reacts to the movement with respect to a square law speed. It's commonly used for describing the resistance  of a fluid
-        
-    this class is based on openCL
+    F = property(getF)
 
-    Constructor:
-        
-    :param    size:        the number of particles in the system
-    :param    dim:         the dimension of the system
-    :param    m:           a vector containig the masses
-    :param    Const:       the drag factor K
-    """
 
-    def __init__(self , size , dim=3 , m=None , Consts=1.0 , ocl_context=None ):
-        
-        self.__dim = int( dim )
-        self.__size = int( size )
-        
-        if ocl_context is None :
-            self.__occ = occ.OpenCLcontext( size , dim , ( occ.OCLC_V | occ.OCLC_A | occ.OCLC_M )  )
-        else :
-            self.__occ = ocl_context        
-        
+class DragOCL(fr.Force):
+    """OpenCL implementation of 3-D quadratic drag."""
+
+    def __init__(self, size, dim=3, m=None, Consts=1.0, ocl_context=None):
+        if cl is None:
+            raise RuntimeError("PyOpenCL is required for DragOCL")
+        if int(dim) != 3:
+            raise ValueError("DragOCL currently supports only 3 dimensions")
+
+        self.__dim = int(dim)
+        self.__size = int(size)
+
+        if ocl_context is None:
+            self.__occ = occ.OpenCLcontext(
+                size,
+                dim,
+                occ.OCLC_V | occ.OCLC_A | occ.OCLC_M,
+            )
+        else:
+            self.__occ = ocl_context
+
         self.__dtype = self.__occ.dtype
-        
-        self.__K = self.__occ.dtype( Consts )
-        
-        self.__A = np.zeros( ( size , dim ) , dtype=self.__occ.dtype )
-        self.__F = np.zeros( ( size , dim ) , dtype=self.__occ.dtype )
-                        
-        if m is not None :
-            self.set_masses( m )
-        
+        self.__K = self.__dtype(Consts)
+        self.__A = np.zeros((size, dim), dtype=self.__dtype)
+        self.__M = np.zeros((size, 1), dtype=self.__dtype)
+
         self.__init_prog_cl()
-    
-    
+        if m is not None:
+            self.set_masses(m)
+
     def __init_prog_cl(self):
-        self.__drag_prg = """
-        __kernel void drag(__global const float *V , 
-                           __global const float *M ,
-                                          float  K , 
-                           __global       float *A )
+        source = r"""
+        __kernel void drag(
+            __global const float *V,
+            __global const float *M,
+                           float  K,
+            __global       float *A)
         {
-            int i = get_global_id(0) ;
-            float mod ;
-            
-            mod = sqrt( pown( V[3*i] , 2 ) + pown( V[3*i+1] , 2 )  + pown( V[3*i+2] , 2 ) ) ;
-                        
-            A[3*i]   = ( -0.5f * K * mod * V[3*i] )  / M[i] ;
-            A[3*i+1] = ( -0.5f * K * mod * V[3*i+1] )  / M[i] ;
-            A[3*i+2] = ( -0.5f * K * mod * V[3*i+2] )  / M[i] ;
-            
+            int i = get_global_id(0);
+            int i0 = 3*i;
+            int i1 = i0 + 1;
+            int i2 = i0 + 2;
+
+            float speed = sqrt(
+                V[i0]*V[i0] + V[i1]*V[i1] + V[i2]*V[i2]
+            );
+
+            A[i0] = (-0.5f * K * speed * V[i0]) / M[i];
+            A[i1] = (-0.5f * K * speed * V[i1]) / M[i];
+            A[i2] = (-0.5f * K * speed * V[i2]) / M[i];
         }
         """
-        
-        self.__cl_program = cl.Program( self.__occ.CL_context , self.__drag_prg ).build()
-        self.__drag_kernel = cl.Kernel( self.__cl_program , "drag" )
-    
-    def set_masses( self , m ):
-        self.__occ.M_cla.set( self.__dtype( m ) , queue=self.__occ.CL_queue )
-    
-    
-    def update_force( self , pset ):
-        
-        self.__occ.V_cla.set( self.__dtype( pset.V ) , queue=self.__occ.CL_queue )
-        
-        self.__drag_kernel( self.__occ.CL_queue , ( self.__size , ) , None , 
-                            self.__occ.V_cla.data ,
-                            self.__occ.M_cla.data , 
-                            self.__K , 
-                            self.__occ.A_cla.data )
-    
-        self.__occ.A_cla.get( self.__occ.CL_queue , self.__A )
-        
+        self.__cl_program = cl.Program(self.__occ.CL_context, source).build()
+        self.__drag_kernel = cl.Kernel(self.__cl_program, "drag")
+
+    def set_masses(self, m):
+        self.__M[:] = np.asarray(m, dtype=self.__dtype)
+        self.__occ.M_cla.set(self.__M, queue=self.__occ.CL_queue)
+
+    def update_force(self, pset):
+        self.__occ.V_cla.set(
+            np.asarray(pset.V, dtype=self.__dtype),
+            queue=self.__occ.CL_queue,
+        )
+
+        self.__drag_kernel(
+            self.__occ.CL_queue,
+            (self.__size,),
+            None,
+            self.__occ.V_cla.data,
+            self.__occ.M_cla.data,
+            self.__K,
+            self.__occ.A_cla.data,
+        )
+
+        self.__occ.A_cla.get(self.__occ.CL_queue, self.__A)
         return self.__A
-    
 
     def getA(self):
         return self.__A
-    A = property( getA )
+
+    A = property(getA)
 
     def getF(self):
-        return self.__A * self.__M[:]
-    
-    F = property( getF )
-    
-    
+        return self.__A * self.__M
 
+    F = property(getF)
