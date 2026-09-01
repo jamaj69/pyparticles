@@ -15,6 +15,7 @@ create OpenCL/OpenGL shared resources after the GL context exists.
 """
 
 import ctypes
+import gc
 import signal
 
 import pyparticles.animation.animated_ogl as legacy
@@ -164,11 +165,22 @@ class AnimatedGl(legacy.AnimatedGl):
         self.__pre_step_callback = None
         self.__post_step_callback = None
 
-        for callback in reversed(self.__cleanup_callbacks):
+        # Consume cleanup closures while the GL context is still current.
+        # Keeping an already-executed closure in this list can retain OpenCL
+        # kernels/contexts until after FreeGLUT destroys GLX, which is unsafe
+        # for objects derived from cl_khr_gl_sharing on the NVIDIA driver.
+        while self.__cleanup_callbacks:
+            callback = self.__cleanup_callbacks.pop()
             try:
                 callback(self)
             except Exception:
                 pass
+            finally:
+                callback = None
+
+        # Collect any cycles released by the callbacks before returning to the
+        # key/close handler that asks FreeGLUT to tear down the GL context.
+        gc.collect()
 
     def build_animation(self):
         global _active_animation
