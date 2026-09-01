@@ -41,9 +41,9 @@ class EulerSolverOCL(os.OdeSolver):
     OpenCL/OpenGL shared buffer, may disable it so X never crosses PCIe during
     the integration hot path. A host-side boundary still forces X current.
 
-    Device forces may optionally expose ``euler_step_device(pset, dt)``. In
-    that case force evaluation and Euler integration can be fused into one
-    kernel launch while the synchronization/boundary policy remains here.
+    Device forces may optionally expose ``euler_step_device``. Fused calls
+    receive the current simulation time and step count so device-side boundary
+    or source models can evolve without synchronizing through the host.
     """
 
     def __init__(
@@ -114,11 +114,14 @@ class EulerSolverOCL(os.OdeSolver):
 
     def __step__(self, dt):
         if self._has_fused_euler_force():
-            # Fused kernels consume resident X/V directly and perform both
-            # force evaluation and Euler integration in one launch.
             self.__occ.sync_to_device("X", self.pset.X)
             self.__occ.sync_to_device("V", self.pset.V)
-            self.force.euler_step_device(self.pset, dt)
+            self.force.euler_step_device(
+                self.pset,
+                dt,
+                sim_time=self.time,
+                step=self.steps_cnt,
+            )
         else:
             if self._has_device_force():
                 self.force.update_force_device(self.pset)
@@ -144,9 +147,6 @@ class EulerSolverOCL(os.OdeSolver):
             self.__occ.mark_device_modified("V")
 
         boundary = self.pset.boundary
-
-        # Host boundaries and trajectory logging need host X even when normal
-        # per-frame synchronization is disabled.
         need_host_positions = (
             self.__sync_positions
             or self.pset.log_X_enabled
