@@ -35,6 +35,10 @@ class EulerSolverOCL(os.OdeSolver):
     ``pset.V`` is current immediately after every step. Rendering-only demos
     may disable it. Boundaries implementing ``needs_update`` then trigger a V
     download only on frames where a particle actually crosses the domain.
+
+    Device forces may optionally expose ``euler_step_device(pset, dt)``. In
+    that case force evaluation and Euler integration can be fused into one
+    kernel launch while the synchronization/boundary policy remains here.
     """
 
     def __init__(self, force, p_set, dt, ocl_context=None, sync_velocity=True):
@@ -88,29 +92,42 @@ class EulerSolverOCL(os.OdeSolver):
             and getattr(self.force, "ocl_context", None) is self.__occ
         )
 
-    def __step__(self, dt):
-        if self._has_device_force():
-            self.force.update_force_device(self.pset)
-        else:
-            self.__occ.sync_to_host("X", self.pset.X)
-            self.__occ.sync_to_host("V", self.pset.V)
-            self.force.update_force(self.pset)
-            self.__occ.set_from_host("A", self.force.A)
-
-        self.__occ.sync_to_device("X", self.pset.X)
-        self.__occ.sync_to_device("V", self.pset.V)
-
-        self.__euler_kernel(
-            self.__occ.CL_queue,
-            (self.pset.size,),
-            None,
-            self.__occ.V_cla.data,
-            self.__occ.A_cla.data,
-            self.__occ.X_cla.data,
-            np.float32(dt),
+    def _has_fused_euler_force(self):
+        return (
+            hasattr(self.force, "euler_step_device")
+            and getattr(self.force, "ocl_context", None) is self.__occ
         )
-        self.__occ.mark_device_modified("X")
-        self.__occ.mark_device_modified("V")
+
+    def __step__(self, dt):
+        if self._has_fused_euler_force():
+            # Fused kernels consume resident X/V directly and perform both
+            # force evaluation and Euler integration in one launch.
+            self.__occ.sync_to_device("X", self.pset.X)
+            self.__occ.sync_to_device("V", self.pset.V)
+            self.force.euler_step_device(self.pset, dt)
+        else:
+            if self._has_device_force():
+                self.force.update_force_device(self.pset)
+            else:
+                self.__occ.sync_to_host("X", self.pset.X)
+                self.__occ.sync_to_host("V", self.pset.V)
+                self.force.update_force(self.pset)
+                self.__occ.set_from_host("A", self.force.A)
+
+            self.__occ.sync_to_device("X", self.pset.X)
+            self.__occ.sync_to_device("V", self.pset.V)
+
+            self.__euler_kernel(
+                self.__occ.CL_queue,
+                (self.pset.size,),
+                None,
+                self.__occ.V_cla.data,
+                self.__occ.A_cla.data,
+                self.__occ.X_cla.data,
+                np.float32(dt),
+            )
+            self.__occ.mark_device_modified("X")
+            self.__occ.mark_device_modified("V")
 
         # The legacy renderer consumes host X every frame.
         self.__occ.sync_to_host("X", self.pset.X)
