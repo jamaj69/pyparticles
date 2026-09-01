@@ -6,6 +6,8 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
+import gc
+
 import numpy as np
 
 import pyparticles.pset.particles_set as ps
@@ -167,9 +169,18 @@ def fountain():
                 animation.set_post_step_callback(
                     lambda _animation: bridge.update_from_device()
                 )
-                animation.add_cleanup_callback(
-                    lambda _animation: bridge.close()
-                )
+
+                def cleanup_interop(_animation, _bridge=bridge, _fallback=solver):
+                    # Drop every reference chain leading to the GL-sharing
+                    # context while the GLX context is still current.  On the
+                    # NVIDIA driver, leaving shared_solver alive until after
+                    # glutLeaveMainLoop() can crash native teardown.
+                    _animation.set_post_step_callback(None)
+                    _bridge.close()
+                    _animation.ode_solver = _fallback
+                    gc.collect()
+
+                animation.add_cleanup_callback(cleanup_interop)
 
                 print(
                     "OpenCL/OpenGL interop enabled: "
