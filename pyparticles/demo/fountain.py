@@ -17,6 +17,7 @@ import pyparticles.ode.euler_solver as els
 import pyparticles.forces.const_force as cf
 import pyparticles.forces.drag as dr
 import pyparticles.forces.multiple_force as mf
+from pyparticles.forces.fused_const_drag import FusedConstDragOCL
 
 import pyparticles.animation.animated_ogl_compat as aogl
 
@@ -66,49 +67,35 @@ def fountain():
             pset.dim,
             occ.OCLC_X | occ.OCLC_V | occ.OCLC_A | occ.OCLC_M,
         )
-        grav = cf.ConstForceOCL(
+        force = FusedConstDragOCL(
             pset.size,
             dim=pset.dim,
+            m=pset.M,
             u_force=(0.0, 0.0, -10.0),
+            drag_const=0.01,
             ocl_context=occx,
         )
-        drag = dr.DragOCL(
-            pset.size,
-            dim=pset.dim,
-            Consts=0.01,
-            ocl_context=occx,
-        )
-        multi = mf.MultipleForceOCL(
-            pset.size,
-            dim=pset.dim,
-            ocl_context=occx,
-        )
-    else:
-        occx = None
-        grav = cf.ConstForce(
-            pset.size,
-            dim=pset.dim,
-            u_force=(0.0, 0.0, -10.0),
-        )
-        drag = dr.Drag(pset.size, dim=pset.dim, Consts=0.01)
-        multi = mf.MultipleForce(pset.size, dim=pset.dim)
-
-    multi.append_force(grav)
-    multi.append_force(drag)
-    multi.set_masses(pset.M)
-
-    if ocl_ok:
         # The renderer needs X but not V. DefaultBoundary advertises whether a
         # frame actually needs host V, so velocity normally remains in VRAM.
         solver = els.EulerSolverOCL(
-            multi,
+            force,
             pset,
             dt,
             ocl_context=occx,
             sync_velocity=False,
         )
     else:
-        solver = els.EulerSolver(multi, pset, dt)
+        grav = cf.ConstForce(
+            pset.size,
+            dim=pset.dim,
+            u_force=(0.0, 0.0, -10.0),
+        )
+        drag = dr.Drag(pset.size, dim=pset.dim, Consts=0.01)
+        force = mf.MultipleForce(pset.size, dim=pset.dim)
+        force.append_force(grav)
+        force.append_force(drag)
+        force.set_masses(pset.M)
+        solver = els.EulerSolver(force, pset, dt)
 
     default_pos.sim_time = solver.get_sim_time()
 
