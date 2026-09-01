@@ -63,6 +63,32 @@ def _sigint_handler(signum, frame):
     _leave_main_loop()
 
 
+def _close_window():
+    _leave_main_loop()
+
+
+def _configure_freeglut_exit():
+    """Ask FreeGLUT to return from its main loop when a window is closed."""
+    set_option = getattr(legacy, "glutSetOption", None)
+    action_key = getattr(legacy, "GLUT_ACTION_ON_WINDOW_CLOSE", None)
+    return_action = getattr(legacy, "GLUT_ACTION_GLUTMAINLOOP_RETURNS", None)
+
+    if set_option is not None and action_key is not None and return_action is not None:
+        try:
+            if bool(set_option):
+                set_option(action_key, return_action)
+        except Exception:
+            pass
+
+    close_func = getattr(legacy, "glutCloseFunc", None)
+    if close_func is not None:
+        try:
+            if bool(close_func):
+                close_func(_close_window)
+        except Exception:
+            pass
+
+
 class AnimatedGl(legacy.AnimatedGl):
     """Legacy renderer with modern FreeGLUT lifecycle compatibility."""
 
@@ -75,7 +101,9 @@ class AnimatedGl(legacy.AnimatedGl):
         # found in the legacy module, so install our adapter before that step.
         legacy.KeyPressed = _key_pressed
 
-        return super(AnimatedGl, self).build_animation()
+        result = super(AnimatedGl, self).build_animation()
+        _configure_freeglut_exit()
+        return result
 
     def start(self):
         previous_sigint = signal.getsignal(signal.SIGINT)
