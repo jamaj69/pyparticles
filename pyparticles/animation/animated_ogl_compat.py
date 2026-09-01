@@ -37,6 +37,16 @@ legacy_vector_field.DrawVectorField.__del__ = _safe_vector_field_del
 
 
 _legacy_key_pressed = legacy.KeyPressed
+_active_animation = None
+
+
+def _cleanup_active_animation():
+    animation = _active_animation
+    if animation is None:
+        return
+    cleanup = getattr(animation, "cleanup_resources", None)
+    if cleanup is not None:
+        cleanup()
 
 
 def _leave_main_loop():
@@ -59,6 +69,10 @@ def _key_pressed(key, x, y):
         key = key.decode("latin-1")
 
     if key in ("q", "Q", "\x1b"):
+        # Shared CL/GL objects must be released while the GLUT window and its
+        # GLX context are still alive.  Calling glutLeaveMainLoop first may
+        # destroy the context before Python finally-block cleanup runs.
+        _cleanup_active_animation()
         _leave_main_loop()
         return
 
@@ -66,11 +80,15 @@ def _key_pressed(key, x, y):
 
 
 def _sigint_handler(signum, frame):
+    _cleanup_active_animation()
     _leave_main_loop()
 
 
 def _close_window():
-    _leave_main_loop()
+    # FreeGLUT invokes the close callback as part of window destruction.
+    # Do not call glutLeaveMainLoop() recursively from here: that re-enters
+    # FreeGLUT's teardown path and can segfault with shared GL/CL resources.
+    _cleanup_active_animation()
 
 
 def _configure_freeglut_exit():
@@ -103,6 +121,7 @@ class AnimatedGl(legacy.AnimatedGl):
         self.__gl_context_ready_callback = None
         self.__post_step_callback = None
         self.__cleanup_callbacks = []
+        self.__cleanup_done = False
 
     def get_trajectory_step(self):
         return legacy.pan.Animation.get_trajectory_step(self)
@@ -130,9 +149,28 @@ class AnimatedGl(legacy.AnimatedGl):
     def add_cleanup_callback(self, callback):
         self.__cleanup_callbacks.append(callback)
 
+    def cleanup_resources(self):
+        """Release GL-dependent resources exactly once while GL is current."""
+        if self.__cleanup_done:
+            return
+        self.__cleanup_done = True
+
+        # No more CL->GL copies may be scheduled once teardown starts.
+        self.__post_step_callback = None
+
+        for callback in reversed(self.__cleanup_callbacks):
+            try:
+                callback(self)
+            except Exception:
+                pass
+
     def build_animation(self):
+        global _active_animation
+
         legacy.ctypes = ctypes
         legacy.KeyPressed = _key_pressed
+        self.__cleanup_done = False
+        _active_animation = self
 
         # The legacy builder creates the GLUT window and immediately evaluates
         # the force.  Wrap just the window creation call so CL/GL resources can
@@ -164,16 +202,19 @@ class AnimatedGl(legacy.AnimatedGl):
         return result
 
     def start(self):
+        global _active_animation
+
         previous_sigint = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, _sigint_handler)
+        _active_animation = self
         try:
             return super(AnimatedGl, self).start()
         except KeyboardInterrupt:
             return None
         finally:
-            for callback in reversed(self.__cleanup_callbacks):
-                try:
-                    callback(self)
-                except Exception:
-                    pass
+            # This is a fallback for non-keyboard exits.  Normal q/Esc and
+            # close-window paths have already run cleanup while GL was current.
+            self.cleanup_resources()
+            if _active_animation is self:
+                _active_animation = None
             signal.signal(signal.SIGINT, previous_sigint)
