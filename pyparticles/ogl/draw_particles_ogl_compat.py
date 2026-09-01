@@ -271,7 +271,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
             and len(self.__gpu_queries_pending) < self._GPU_QUERY_LIMIT
         ):
             try:
-                query = int(glGenQueries(1))
+                query = int(np.asarray(glGenQueries(1)).reshape(-1)[0])
                 glBeginQuery(GL_TIME_ELAPSED, query)
             except Exception as exc:
                 self._disable_gpu_timing(exc)
