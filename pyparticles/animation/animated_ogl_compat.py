@@ -19,6 +19,7 @@ import signal
 import pyparticles.animation.animated_ogl as legacy
 import pyparticles.ogl.draw_particles_ogl as legacy_draw
 import pyparticles.ogl.draw_particles_ogl_compat as draw_compat
+import pyparticles.ogl.draw_vector_field as legacy_vector_field
 
 
 # The legacy AnimatedGl constructor resolves DrawParticlesGL through the
@@ -29,6 +30,17 @@ legacy_draw.DrawParticlesGL = draw_compat.DrawParticlesGL
 legacy_draw.charged_particles_color = draw_compat.charged_particles_color
 legacy_draw.charged_particles_vect_color = draw_compat.charged_particles_vect_color
 legacy.drp.DrawParticlesGL = draw_compat.DrawParticlesGL
+
+
+# OpenGL contexts are commonly destroyed before Python finalizes renderer
+# objects.  Avoid issuing glDeleteLists calls from object finalizers after the
+# context has disappeared.  The driver releases these objects with the context.
+def _safe_vector_field_del(self):
+    pass
+
+
+legacy_vector_field.DrawVectorField.__del__ = _safe_vector_field_del
+
 
 _legacy_key_pressed = legacy.KeyPressed
 
@@ -91,6 +103,17 @@ def _configure_freeglut_exit():
 
 class AnimatedGl(legacy.AnimatedGl):
     """Legacy renderer with modern FreeGLUT lifecycle compatibility."""
+
+    # The 2012 AnimatedGl getter contains a typo (get_rajectory_step).  Keep
+    # the public property working for all demos without editing the renderer.
+    def get_trajectory_step(self):
+        return legacy.pan.Animation.get_trajectory_step(self)
+
+    def set_trajectory_step(self, value):
+        legacy.pan.Animation.set_trajectory_step(self, value)
+        self.draw_particles.set_trajectory_step(value)
+
+    trajectory_step = property(get_trajectory_step, set_trajectory_step)
 
     def build_animation(self):
         # animated_ogl.py uses ctypes.c_char_p() but the original Linux path
