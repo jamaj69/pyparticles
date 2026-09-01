@@ -98,6 +98,7 @@ class GravityOCL(fr.Force):
             __global const float *X,
             __global const float *M,
                            float  G,
+                             int  accumulate,
             __global       float *A)
         {
             int i = get_global_id(0);
@@ -127,9 +128,18 @@ class GravityOCL(fr.Force):
                 at.z += f * u.z;
             }
 
-            A[i0] = at.x;
-            A[i1] = at.y;
-            A[i2] = at.z;
+            if (accumulate)
+            {
+                A[i0] += at.x;
+                A[i1] += at.y;
+                A[i2] += at.z;
+            }
+            else
+            {
+                A[i0] = at.x;
+                A[i1] = at.y;
+                A[i2] = at.z;
+            }
         }
         """
         self.__cl_program = cl.Program(self.__occ.CL_context, source).build()
@@ -137,13 +147,12 @@ class GravityOCL(fr.Force):
 
     def set_masses(self, m):
         self.__M[:] = np.asarray(m, dtype=self.__dtype)
-        self.__occ.M_cla.set(self.__M, queue=self.__occ.CL_queue)
+        self.__occ.set_from_host("M", self.__M)
 
-    def update_force(self, p_set):
-        self.__occ.X_cla.set(
-            np.asarray(p_set.X, dtype=self.__dtype),
-            queue=self.__occ.CL_queue,
-        )
+    def update_force_device(self, p_set, accumulate=False, host_authoritative=False):
+        if host_authoritative:
+            self.__occ.mark_host_modified("X")
+        self.__occ.sync_to_device("X", p_set.X)
 
         self.__kernel(
             self.__occ.CL_queue,
@@ -152,10 +161,15 @@ class GravityOCL(fr.Force):
             self.__occ.X_cla.data,
             self.__occ.M_cla.data,
             self.__G,
+            np.int32(bool(accumulate)),
             self.__occ.A_cla.data,
         )
+        self.__occ.mark_device_modified("A")
+        return self.__occ.A_cla
 
-        self.__occ.A_cla.get(self.__occ.CL_queue, self.__A)
+    def update_force(self, p_set):
+        self.update_force_device(p_set, accumulate=False, host_authoritative=True)
+        self.__occ.sync_to_host("A", self.__A)
         return self.__A
 
     def getA(self):
@@ -164,6 +178,12 @@ class GravityOCL(fr.Force):
     A = property(getA)
 
     def getF(self):
+        self.__occ.sync_to_host("A", self.__A)
         return self.__A * self.__M
 
     F = property(getF)
+
+    def get_ocl_context(self):
+        return self.__occ
+
+    ocl_context = property(get_ocl_context)
