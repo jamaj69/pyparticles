@@ -91,13 +91,13 @@ class ParticlesSet(object):
         self.__property_dict['X'] = self.__X
         self.__property_dict['V'] = self.__V
         
-        if self.__mass  != None :
+        if self.__mass is not None :
             self.__property_dict['M'] = self.__mass
         
-        if self.__label != None :
+        if self.__label is not None :
             self.__property_dict['label'] = self.__label
             
-        if self.__Q != None :
+        if self.__Q is not None :
             self.__property_dict['Q'] = self.__Q
         
         self.__notify_set_changed = []
@@ -115,8 +115,6 @@ class ParticlesSet(object):
         del self.__V
         del self.__mass
         del self.__label
-        del self.__log_X
-        del self.__log_V
         del self.__property_dict
         
         self.__init__( size , dim , boundary , label , mass , velocity , charge , log_X , log_V , log_max_size )
@@ -135,7 +133,7 @@ class ParticlesSet(object):
         """
         
         for k in self.__property_dict.keys() :
-            if self.__property_dict[k] == None :
+            if self.__property_dict[k] is None :
                 continue 
             
             if k == "label" :
@@ -206,10 +204,10 @@ class ParticlesSet(object):
             pset.add_property_by_name( "radius" , dim=1 , to_type=np.float64 )
         """
         
-        if to_type == None :
+        if to_type is None :
             to_type = self.dtype
         
-        if dim == None :
+        if dim is None :
             dim = self.dim
         
         if model == "numpy_array" :
@@ -222,7 +220,7 @@ class ParticlesSet(object):
         """
         Return a list of containing the names of all properties
         """
-        return self.__property_dict.keys().copy()
+        return list( self.__property_dict.keys() )
 
     def get_dtype(self):
         return self.__dtype
@@ -274,7 +272,7 @@ class ParticlesSet(object):
         lst = lstX + lstV
         lst.append( lstM )
         
-        if self.__label != None :
+        if self.__label is not None :
             lst.append( self.__label[i] )
             
         return lst
@@ -296,7 +294,7 @@ class ParticlesSet(object):
         """
         
         for k in p_dict.keys():
-            if not self.__property_dict.has_key( k ) :
+            if k not in self.__property_dict :
                 raise ValueError
         
         for kpr in self.__property_dict.keys() :
@@ -324,7 +322,7 @@ class ParticlesSet(object):
 
     def add_set_changed_listener( self , listener ) :
         """
-        Add an object that contains a member methods called: *particles_set_changed( pset )* that there will be called if the particle set will be modified.
+        Add an object that contains a member methods called: *particles_set_changed( pset )* that there will be called if the particle set is modified.
         """
         self.__notify_set_changed.append( listener )
 
@@ -332,7 +330,7 @@ class ParticlesSet(object):
         """
         Update the particle set according to the boundary rule
         """
-        if self.__bound != None :
+        if self.__bound is not None :
             self.__bound.boundary( self )
         
     def get_boundary( self ):
@@ -347,12 +345,12 @@ class ParticlesSet(object):
 
       
     def append_logger( self , logger , key=None ):
-        if key == None :
+        if key is None :
             key = "".join(random.choice(string.ascii_uppercase + string.ascii_lowercase + string.digits) for x in range(40))
             
         self.__log[key] = logger
         
-        if self.__default_logger == None :
+        if self.__default_logger is None :
             self.__default_logger = key
         
         return key
@@ -499,5 +497,3 @@ class ParticlesSet(object):
         for c in Cs:
             self.__X[n[i]:n[i]+c.shape[0]] = c
             i = i + 1
-            
-    
