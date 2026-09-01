@@ -75,6 +75,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
     def __init__(self, *args, **kwargs):
         super(DrawParticlesGL, self).__init__(*args, **kwargs)
         self.__shared_position_vbo = None
+        self.__shared_position_draw_complete_callback = None
         self.__last_draw_submit_seconds = 0.0
 
     def __del__(self):
@@ -114,6 +115,18 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
 
     shared_position_vbo = property(
         get_shared_position_vbo, set_shared_position_vbo
+    )
+
+    def set_shared_position_draw_complete_callback(self, callback):
+        """Set a callback invoked just after a shared-VBO draw is submitted."""
+        self.__shared_position_draw_complete_callback = callback
+
+    def get_shared_position_draw_complete_callback(self):
+        return self.__shared_position_draw_complete_callback
+
+    shared_position_draw_complete_callback = property(
+        get_shared_position_draw_complete_callback,
+        set_shared_position_draw_complete_callback,
     )
 
     def get_last_draw_submit_seconds(self):
@@ -193,7 +206,8 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
         else:
             # Positions are already in GPU memory.  Apply the unit conversion
             # as a model-view scale instead of materializing a host array.
-            glBindBuffer(GL_ARRAY_BUFFER, self.__shared_position_vbo)
+            vbo = self.__shared_position_vbo
+            glBindBuffer(GL_ARRAY_BUFFER, vbo)
             glVertexPointer(3, GL_FLOAT, 0, ctypes.c_void_p(0))
             glPushMatrix()
             unit_scale = 1.0 / float(self.pset.unit)
@@ -201,6 +215,14 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
             draw_start = time.perf_counter()
             glDrawArrays(GL_POINTS, 0, self.pset.size)
             self.__last_draw_submit_seconds = time.perf_counter() - draw_start
+
+            # The fence belongs immediately after the command that consumes
+            # this VBO.  The CL/GL bridge uses it before reacquiring this same
+            # buffer on a later frame, avoiding a global glFinish().
+            callback = self.__shared_position_draw_complete_callback
+            if callback is not None:
+                callback(vbo)
+
             glPopMatrix()
             glBindBuffer(GL_ARRAY_BUFFER, 0)
 
