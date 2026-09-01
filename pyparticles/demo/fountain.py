@@ -41,10 +41,11 @@ def _env_true(name):
 
 
 def _event_profile_seconds(event):
+    nan = float("nan")
     result = {
-        "queue_s": 0.0,
-        "exec_s": 0.0,
-        "total_s": 0.0,
+        "queue_s": nan,
+        "exec_s": nan,
+        "total_s": nan,
     }
     if event is None:
         return result
@@ -56,10 +57,29 @@ def _event_profile_seconds(event):
         return result
 
     scale = 1.0e-9
-    result["queue_s"] = max(0, start - queued) * scale
-    result["exec_s"] = max(0, end - start) * scale
-    result["total_s"] = max(0, end - queued) * scale
+    if queued > 0 and start >= queued:
+        result["queue_s"] = (start - queued) * scale
+    if start > 0 and end >= start:
+        result["exec_s"] = (end - start) * scale
+    if queued > 0 and end >= queued:
+        result["total_s"] = (end - queued) * scale
     return result
+
+
+def _valid_mean(values):
+    if not values:
+        return float("nan")
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if array.size == 0:
+        return float("nan")
+    return float(np.mean(array))
+
+
+def _format_ms(value):
+    if not np.isfinite(value):
+        return "     n/a"
+    return "%8.3f ms" % (value * 1000.0)
 
 
 def default_pos(pset, indx):
@@ -248,16 +268,16 @@ def fountain():
                             return
 
                         avg = {
-                            name: float(np.mean(values)) if values else 0.0
+                            name: _valid_mean(values)
                             for name, values in samples.items()
                         }
                         frame_ms = avg["frame_wall_s"] * 1000.0
-                        fps = 1.0 / avg["frame_wall_s"] if avg["frame_wall_s"] else 0.0
+                        fps = 1.0 / avg["frame_wall_s"]
                         p95_ms = float(
                             np.percentile(samples["frame_wall_s"], 95)
                         ) * 1000.0
-                        copy_bw = 0.0
-                        if avg["copy_gpu_s"] > 0.0:
+                        copy_bw = float("nan")
+                        if np.isfinite(avg["copy_gpu_s"]) and avg["copy_gpu_s"] > 0.0:
                             copy_bw = (
                                 pset.size * pset.dim * np.dtype(np.float32).itemsize
                                 / avg["copy_gpu_s"]
@@ -274,10 +294,10 @@ def fountain():
                         )
                         print("frame wall avg       : %8.3f ms  (%7.1f FPS)" % (frame_ms, fps))
                         print("frame wall p95       : %8.3f ms" % p95_ms)
-                        print("physics queue->start : %8.3f ms" % (avg["physics_queue_s"] * 1000.0))
-                        print("physics fused GPU    : %8.3f ms" % (avg["physics_gpu_s"] * 1000.0))
-                        print("physics queued->end  : %8.3f ms" % (avg["physics_total_s"] * 1000.0))
-                        if gl_samples:
+                        print("physics queue->start : %s" % _format_ms(avg["physics_queue_s"]))
+                        print("physics fused GPU    : %s" % _format_ms(avg["physics_gpu_s"]))
+                        print("physics queued->end  : %s" % _format_ms(avg["physics_total_s"]))
+                        if gl_samples and np.isfinite(avg["gl_draw_gpu_s"]):
                             print("glDrawArrays GPU     : %8.3f ms  (%d async samples)" % (
                                 avg["gl_draw_gpu_s"] * 1000.0, gl_samples
                             ))
@@ -288,28 +308,29 @@ def fountain():
                             timing_stats["skipped"],
                             timing_stats["available"],
                         ))
-                        print("GL fence wait wall   : %8.3f ms" % (
-                            avg["gl_fence_wait_wall_s"] * 1000.0
-                        ))
+                        if timing_stats.get("error"):
+                            print("GL timer error       : %s" % timing_stats["error"])
+                        print("GL fence wait wall   : %s" % _format_ms(avg["gl_fence_wait_wall_s"]))
                         print("fence immediate      : %8.1f %%" % (
                             avg["fence_immediate"] * 100.0
                         ))
-                        print("glFinish fallback    : %8.3f ms" % (
-                            avg["gl_finish_fallback_wall_s"] * 1000.0
-                        ))
-                        print("CL acquire queue     : %8.3f ms" % (avg["acquire_queue_s"] * 1000.0))
-                        print("CL acquire exec      : %8.3f ms" % (avg["acquire_gpu_s"] * 1000.0))
-                        print("CL acquire total     : %8.3f ms" % (avg["acquire_total_s"] * 1000.0))
-                        print("CL copy queue        : %8.3f ms" % (avg["copy_queue_s"] * 1000.0))
-                        print("X -> VBO copy GPU    : %8.3f ms  (%6.2f GiB/s)" % (
-                            avg["copy_gpu_s"] * 1000.0, copy_bw
-                        ))
-                        print("CL copy total        : %8.3f ms" % (avg["copy_total_s"] * 1000.0))
-                        print("CL release queue     : %8.3f ms" % (avg["release_queue_s"] * 1000.0))
-                        print("CL release exec      : %8.3f ms" % (avg["release_gpu_s"] * 1000.0))
-                        print("CL release total     : %8.3f ms" % (avg["release_total_s"] * 1000.0))
-                        print("release.wait wall    : %8.3f ms" % (avg["release_wait_wall_s"] * 1000.0))
-                        print("CL/GL bridge wall    : %8.3f ms" % (avg["bridge_wall_s"] * 1000.0))
+                        print("glFinish fallback    : %s" % _format_ms(avg["gl_finish_fallback_wall_s"]))
+                        print("CL acquire queue     : %s" % _format_ms(avg["acquire_queue_s"]))
+                        print("CL acquire exec      : %s" % _format_ms(avg["acquire_gpu_s"]))
+                        print("CL acquire total     : %s" % _format_ms(avg["acquire_total_s"]))
+                        print("CL copy queue        : %s" % _format_ms(avg["copy_queue_s"]))
+                        if np.isfinite(copy_bw):
+                            print("X -> VBO copy GPU    : %8.3f ms  (%6.2f GiB/s)" % (
+                                avg["copy_gpu_s"] * 1000.0, copy_bw
+                            ))
+                        else:
+                            print("X -> VBO copy GPU    : %s" % _format_ms(avg["copy_gpu_s"]))
+                        print("CL copy total        : %s" % _format_ms(avg["copy_total_s"]))
+                        print("CL release queue     : %s" % _format_ms(avg["release_queue_s"]))
+                        print("CL release exec      : %s" % _format_ms(avg["release_gpu_s"]))
+                        print("CL release total     : %s" % _format_ms(avg["release_total_s"]))
+                        print("release.wait wall    : %s" % _format_ms(avg["release_wait_wall_s"]))
+                        print("CL/GL bridge wall    : %s" % _format_ms(avg["bridge_wall_s"]))
                         print("glDrawArrays submit  : %8.3f ms CPU" % (
                             avg["draw_submit_cpu_s"] * 1000.0
                         ))
@@ -324,7 +345,7 @@ def fountain():
 
                     def profiled_bridge_update(_animation):
                         # Poll timer-query results from earlier GL draws.  This
-                        # uses QUERY_RESULT_AVAILABLE first and never waits.
+                        # checks QUERY_RESULT_AVAILABLE first and never waits.
                         ready_gl_draws = animation.draw_particles.drain_gpu_draw_times()
 
                         bridge.update_from_device()
@@ -365,7 +386,9 @@ def fountain():
                             "release_wait_wall_s",
                             "bridge_wall_s",
                         ):
-                            samples[name].append(float(bp.get(name, 0.0)))
+                            samples[name].append(
+                                float(bp.get(name, float("nan")))
+                            )
                         samples["draw_submit_cpu_s"].append(
                             float(animation.draw_particles.last_draw_submit_seconds)
                         )
