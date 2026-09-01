@@ -11,6 +11,15 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pyopencl as cl
 
+# PyOpenCL 2026.1.x keeps this helper in pyopencl.tools even though some
+# documentation still presents it as a top-level pyopencl symbol.
+try:
+    _get_gl_sharing_context_properties = cl.get_gl_sharing_context_properties
+except AttributeError:
+    from pyopencl.tools import (
+        get_gl_sharing_context_properties as _get_gl_sharing_context_properties,
+    )
+
 from OpenGL.GL import (
     GL_ARRAY_BUFFER,
     GL_DYNAMIC_DRAW,
@@ -53,7 +62,7 @@ def main():
             glBufferData(GL_ARRAY_BUFFER, payload.nbytes, None, GL_DYNAMIC_DRAW)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-            sharing = list(cl.get_gl_sharing_context_properties())
+            sharing = list(_get_gl_sharing_context_properties())
             print("GL sharing properties:", sharing)
 
             last_error = None
