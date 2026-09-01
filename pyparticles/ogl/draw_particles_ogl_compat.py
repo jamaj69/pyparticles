@@ -12,6 +12,8 @@ client arrays for current PyOpenGL and NumPy releases.
 """
 
 import ctypes
+import time
+
 import numpy as np
 
 from OpenGL.GL import (
@@ -73,6 +75,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
     def __init__(self, *args, **kwargs):
         super(DrawParticlesGL, self).__init__(*args, **kwargs)
         self.__shared_position_vbo = None
+        self.__last_draw_submit_seconds = 0.0
 
     def __del__(self):
         # OpenGL contexts are frequently already gone during interpreter
@@ -112,6 +115,12 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
     shared_position_vbo = property(
         get_shared_position_vbo, set_shared_position_vbo
     )
+
+    def get_last_draw_submit_seconds(self):
+        """CPU time spent submitting the most recent glDrawArrays call."""
+        return self.__last_draw_submit_seconds
+
+    last_draw_submit_seconds = property(get_last_draw_submit_seconds)
 
     def draw_particle(self, pset, i):
         mass = _scalar(pset.M[i])
@@ -178,7 +187,9 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
             )
             glBindBuffer(GL_ARRAY_BUFFER, 0)
             glVertexPointer(3, GL_FLOAT, 0, vertices)
+            draw_start = time.perf_counter()
             glDrawArrays(GL_POINTS, 0, self.pset.size)
+            self.__last_draw_submit_seconds = time.perf_counter() - draw_start
         else:
             # Positions are already in GPU memory.  Apply the unit conversion
             # as a model-view scale instead of materializing a host array.
@@ -187,7 +198,9 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
             glPushMatrix()
             unit_scale = 1.0 / float(self.pset.unit)
             glScalef(unit_scale, unit_scale, unit_scale)
+            draw_start = time.perf_counter()
             glDrawArrays(GL_POINTS, 0, self.pset.size)
+            self.__last_draw_submit_seconds = time.perf_counter() - draw_start
             glPopMatrix()
             glBindBuffer(GL_ARRAY_BUFFER, 0)
 
