@@ -119,6 +119,7 @@ class AnimatedGl(legacy.AnimatedGl):
     def __init__(self):
         super(AnimatedGl, self).__init__()
         self.__gl_context_ready_callback = None
+        self.__pre_step_callback = None
         self.__post_step_callback = None
         self.__cleanup_callbacks = []
         self.__cleanup_done = False
@@ -142,6 +143,10 @@ class AnimatedGl(legacy.AnimatedGl):
         """
         self.__gl_context_ready_callback = callback
 
+    def set_pre_step_callback(self, callback):
+        """Run *callback(animation)* immediately before each solver step."""
+        self.__pre_step_callback = callback
+
     def set_post_step_callback(self, callback):
         """Run *callback(animation)* after each solver step and before draw."""
         self.__post_step_callback = callback
@@ -155,7 +160,8 @@ class AnimatedGl(legacy.AnimatedGl):
             return
         self.__cleanup_done = True
 
-        # No more CL->GL copies may be scheduled once teardown starts.
+        # No more CL/GL work may be scheduled once teardown starts.
+        self.__pre_step_callback = None
         self.__post_step_callback = None
 
         for callback in reversed(self.__cleanup_callbacks):
@@ -195,7 +201,12 @@ class AnimatedGl(legacy.AnimatedGl):
         return result
 
     def data_stream(self):
+        callback = self.__pre_step_callback
+        if callback is not None:
+            callback(self)
+
         result = super(AnimatedGl, self).data_stream()
+
         callback = self.__post_step_callback
         if callback is not None:
             callback(self)
