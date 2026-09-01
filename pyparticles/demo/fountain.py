@@ -202,7 +202,9 @@ def fountain():
                     metric_names = (
                         "frame_wall_s",
                         "physics_gpu_s",
-                        "gl_finish_wall_s",
+                        "gl_fence_wait_wall_s",
+                        "gl_finish_fallback_wall_s",
+                        "fence_immediate",
                         "acquire_gpu_s",
                         "copy_gpu_s",
                         "release_gpu_s",
@@ -249,7 +251,15 @@ def fountain():
                         print("frame wall avg       : %8.3f ms  (%7.1f FPS)" % (frame_ms, fps))
                         print("frame wall p95       : %8.3f ms" % p95_ms)
                         print("physics fused GPU    : %8.3f ms" % (avg["physics_gpu_s"] * 1000.0))
-                        print("glFinish wait wall   : %8.3f ms" % (avg["gl_finish_wall_s"] * 1000.0))
+                        print("GL fence wait wall   : %8.3f ms" % (
+                            avg["gl_fence_wait_wall_s"] * 1000.0
+                        ))
+                        print("fence immediate      : %8.1f %%" % (
+                            avg["fence_immediate"] * 100.0
+                        ))
+                        print("glFinish fallback    : %8.3f ms" % (
+                            avg["gl_finish_fallback_wall_s"] * 1000.0
+                        ))
                         print("CL acquire GPU       : %8.3f ms" % (avg["acquire_gpu_s"] * 1000.0))
                         print("X -> VBO copy GPU    : %8.3f ms  (%6.2f GiB/s)" % (
                             avg["copy_gpu_s"] * 1000.0, copy_bw
@@ -288,7 +298,9 @@ def fountain():
                             _event_seconds(shared_force.last_step_event)
                         )
                         for name in (
-                            "gl_finish_wall_s",
+                            "gl_fence_wait_wall_s",
+                            "gl_finish_fallback_wall_s",
+                            "fence_immediate",
                             "acquire_gpu_s",
                             "copy_gpu_s",
                             "release_gpu_s",
@@ -332,6 +344,7 @@ def fountain():
                     "OpenCL/OpenGL interop enabled: "
                     "positions render without host copies"
                 )
+                print("CL/GL sync: double-buffered VBOs with per-buffer GL fences")
                 print("Interop device:", shared_ctx.device.name)
             except Exception as exc:
                 if bridge is not None:
