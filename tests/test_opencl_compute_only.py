@@ -58,10 +58,55 @@ class OpenCLComputeOnlyTests(unittest.TestCase):
         self.assertEqual(stats["h2d_bytes"], 0)
         self.assertEqual(stats["d2h_bytes"], 0)
 
-        # Explicit synchronization still produces the final host state.
         solver.sync_to_host(velocity=True)
         self.assertEqual(ctx.transfer_stats["by_buffer"]["X"]["d2h_calls"], 1)
         self.assertEqual(ctx.transfer_stats["by_buffer"]["V"]["d2h_calls"], 1)
+
+    def test_fountain_boundary_respawns_entirely_on_device(self):
+        n = 64
+        dt = 0.005
+        bounds = (-100.0, 100.0, -100.0, 100.0, 0.0, 100.0)
+
+        pset = ParticlesSet(n, dtype=np.float32)
+        pset.M[:] = 0.1
+        pset.X[:] = 0.0
+        pset.X[:, 2] = -1.0  # every particle starts outside the fountain floor
+        pset.V[:] = 0.0
+
+        ctx = OpenCLcontext(n, 3, OCLC_X | OCLC_V | OCLC_A | OCLC_M)
+        force = FusedConstDragOCL(
+            n,
+            m=pset.M,
+            u_force=(0.0, 0.0, -10.0),
+            drag_const=0.01,
+            ocl_context=ctx,
+            fountain_bounds=bounds,
+        )
+        solver = EulerSolverOCL(
+            force,
+            pset,
+            dt,
+            ocl_context=ctx,
+            sync_velocity=False,
+            sync_positions=False,
+        )
+
+        ctx.set_from_host("X", pset.X)
+        ctx.set_from_host("V", pset.V)
+        ctx.reset_transfer_stats()
+        solver.step()
+
+        stats = ctx.transfer_stats
+        self.assertEqual(stats["h2d_calls"], 0)
+        self.assertEqual(stats["d2h_calls"], 0)
+
+        solver.sync_to_host(velocity=True)
+
+        self.assertTrue(np.all(pset.X >= 0.0))
+        self.assertTrue(np.all(pset.X < 0.01))
+        self.assertTrue(np.all(pset.V[:, 2] > 0.0))
+        self.assertTrue(np.all(np.isfinite(pset.X)))
+        self.assertTrue(np.all(np.isfinite(pset.V)))
 
 
 if __name__ == "__main__":
