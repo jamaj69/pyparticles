@@ -15,8 +15,15 @@
 #along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
-import os
 import glob
+import os
+import sys
+
+# All official demos were written against the legacy animated_ogl module.
+# Route that import to the modern FreeGLUT compatibility layer while keeping
+# the original renderer available internally to animated_ogl_compat.
+from pyparticles.animation import animated_ogl_compat as _animated_ogl_compat
+sys.modules["pyparticles.animation.animated_ogl"] = _animated_ogl_compat
 
 __all__ = [ os.path.splitext( os.path.basename(f) )[0] for f in glob.glob(os.path.dirname(os.path.abspath(__file__))+"/*.py")]
 
