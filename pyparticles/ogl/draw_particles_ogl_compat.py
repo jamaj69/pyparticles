@@ -12,18 +12,25 @@ client arrays for current PyOpenGL and NumPy releases.
 """
 
 import ctypes
+import os
 import time
 
 import numpy as np
 
 from OpenGL.GL import (
+    GL_ALPHA_TEST,
     GL_ARRAY_BUFFER,
+    GL_BLEND,
     GL_COLOR_ARRAY,
+    GL_DEPTH_TEST,
     GL_FLOAT,
+    GL_FOG,
     GL_LINES,
+    GL_MULTISAMPLE,
     GL_POINTS,
     GL_QUERY_RESULT,
     GL_QUERY_RESULT_AVAILABLE,
+    GL_TEXTURE_2D,
     GL_TIME_ELAPSED,
     GL_UNSIGNED_INT,
     GL_VERTEX_ARRAY,
@@ -34,13 +41,16 @@ from OpenGL.GL import (
     glColor4f,
     glColorPointer,
     glDeleteQueries,
+    glDisable,
     glDisableClientState,
     glDrawArrays,
     glDrawElements,
+    glEnable,
     glEnableClientState,
     glEnd,
     glEndQuery,
     glGenQueries,
+    glIsEnabled,
     glPointSize,
     glPopMatrix,
     glPushMatrix,
@@ -86,12 +96,38 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
     """Legacy particle renderer with modern scalar and buffer handling."""
 
     _GPU_QUERY_LIMIT = 64
+    _RENDER_BENCH_MODES = {
+        "legacy": (),
+        "no_msaa": (GL_MULTISAMPLE,),
+        "no_fog": (GL_FOG,),
+        "no_blend": (GL_BLEND,),
+        "no_alpha": (GL_ALPHA_TEST,),
+        "no_depth": (GL_DEPTH_TEST,),
+        "fast_points": (
+            GL_MULTISAMPLE,
+            GL_FOG,
+            GL_BLEND,
+            GL_ALPHA_TEST,
+            GL_DEPTH_TEST,
+            GL_TEXTURE_2D,
+        ),
+    }
 
     def __init__(self, *args, **kwargs):
         super(DrawParticlesGL, self).__init__(*args, **kwargs)
         self.__shared_position_vbo = None
         self.__shared_position_draw_complete_callback = None
         self.__last_draw_submit_seconds = 0.0
+
+        requested_mode = os.environ.get(
+            "PYPARTICLES_GL_BENCH_MODE", "legacy"
+        ).strip().lower()
+        if requested_mode not in self._RENDER_BENCH_MODES:
+            requested_mode = "legacy"
+        self.__render_benchmark_mode = requested_mode
+
+        if "PYPARTICLES_GL_BENCH_MODE" in os.environ:
+            print("OpenGL particle draw mode:", self.__render_benchmark_mode)
 
         # GL timer queries are opt-in and are polled asynchronously.  Never ask
         # for GL_QUERY_RESULT until GL_QUERY_RESULT_AVAILABLE says the result is
@@ -153,6 +189,49 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
         get_shared_position_draw_complete_callback,
         set_shared_position_draw_complete_callback,
     )
+
+    def set_render_benchmark_mode(self, mode):
+        """Select particle-only GL state controls for renderer benchmarking."""
+        mode = str(mode).strip().lower()
+        if mode not in self._RENDER_BENCH_MODES:
+            raise ValueError(
+                "Unknown OpenGL benchmark mode %r; expected one of: %s"
+                % (mode, ", ".join(sorted(self._RENDER_BENCH_MODES)))
+            )
+        self.__render_benchmark_mode = mode
+
+    def get_render_benchmark_mode(self):
+        return self.__render_benchmark_mode
+
+    render_benchmark_mode = property(
+        get_render_benchmark_mode, set_render_benchmark_mode
+    )
+
+    def get_render_benchmark_modes(self):
+        return tuple(sorted(self._RENDER_BENCH_MODES))
+
+    render_benchmark_modes = property(get_render_benchmark_modes)
+
+    def _disable_benchmark_states(self):
+        """Disable selected GL states and return those that must be restored."""
+        disabled = []
+        for state in self._RENDER_BENCH_MODES[self.__render_benchmark_mode]:
+            try:
+                if bool(glIsEnabled(state)):
+                    glDisable(state)
+                    disabled.append(state)
+            except Exception:
+                # Benchmark controls must never make the renderer unusable.
+                pass
+        return disabled
+
+    @staticmethod
+    def _restore_benchmark_states(states):
+        for state in states:
+            try:
+                glEnable(state)
+            except Exception:
+                pass
 
     def get_last_draw_submit_seconds(self):
         """CPU time spent submitting the most recent glDrawArrays call."""
@@ -264,6 +343,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
         """Submit the point draw, optionally wrapped in an asynchronous timer."""
         self._poll_gpu_timing()
         query = None
+        disabled_states = self._disable_benchmark_states()
 
         if (
             self.__gpu_timing_enabled
@@ -294,6 +374,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
                         glDeleteQueries(1, [query])
                     except Exception:
                         pass
+            self._restore_benchmark_states(disabled_states)
 
     def draw_particle(self, pset, i):
         mass = _scalar(pset.M[i])
