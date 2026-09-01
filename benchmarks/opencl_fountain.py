@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark the fountain physics core on CPU and resident OpenCL buffers."""
+"""Benchmark CPU, resident OpenCL, and fused OpenCL fountain physics."""
 
 import argparse
 from pathlib import Path
@@ -16,6 +16,7 @@ import numpy as np
 
 from pyparticles.forces.const_force import ConstForce, ConstForceOCL
 from pyparticles.forces.drag import Drag, DragOCL
+from pyparticles.forces.fused_const_drag import FusedConstDragOCL
 from pyparticles.forces.multiple_force import MultipleForce, MultipleForceOCL
 from pyparticles.ode.euler_solver import EulerSolver, EulerSolverOCL
 from pyparticles.pset.opencl_context import (
@@ -35,12 +36,17 @@ def build_initial_state(n, seed):
     return x, v
 
 
-def build_cpu(x0, v0, dt):
-    n = len(x0)
-    pset = ParticlesSet(n, dtype=np.float32)
+def make_pset(x0, v0):
+    pset = ParticlesSet(len(x0), dtype=np.float32)
     pset.X[:] = x0
     pset.V[:] = v0
     pset.M[:] = 0.1
+    return pset
+
+
+def build_cpu(x0, v0, dt):
+    n = len(x0)
+    pset = make_pset(x0, v0)
 
     gravity = ConstForce(n, u_force=(0.0, 0.0, -10.0))
     drag = Drag(n, Consts=0.01)
@@ -51,14 +57,17 @@ def build_cpu(x0, v0, dt):
     return pset, EulerSolver(force, pset, dt)
 
 
-def build_gpu(x0, v0, dt):
-    n = len(x0)
-    pset = ParticlesSet(n, dtype=np.float32)
-    pset.X[:] = x0
-    pset.V[:] = v0
-    pset.M[:] = 0.1
+def preload(ctx, pset):
+    ctx.set_from_host("X", pset.X)
+    ctx.set_from_host("V", pset.V)
+    ctx.reset_transfer_stats()
 
+
+def build_gpu_generic(x0, v0, dt):
+    n = len(x0)
+    pset = make_pset(x0, v0)
     ctx = OpenCLcontext(n, 3, OCLC_X | OCLC_V | OCLC_A | OCLC_M)
+
     gravity = ConstForceOCL(
         n,
         u_force=(0.0, 0.0, -10.0),
@@ -77,11 +86,30 @@ def build_gpu(x0, v0, dt):
         ocl_context=ctx,
         sync_velocity=False,
     )
+    preload(ctx, pset)
+    return pset, solver, ctx
 
-    # Remove initial state upload from the steady-state transfer accounting.
-    ctx.set_from_host("X", pset.X)
-    ctx.set_from_host("V", pset.V)
-    ctx.reset_transfer_stats()
+
+def build_gpu_fused(x0, v0, dt):
+    n = len(x0)
+    pset = make_pset(x0, v0)
+    ctx = OpenCLcontext(n, 3, OCLC_X | OCLC_V | OCLC_A | OCLC_M)
+
+    force = FusedConstDragOCL(
+        n,
+        m=pset.M,
+        u_force=(0.0, 0.0, -10.0),
+        drag_const=0.01,
+        ocl_context=ctx,
+    )
+    solver = EulerSolverOCL(
+        force,
+        pset,
+        dt,
+        ocl_context=ctx,
+        sync_velocity=False,
+    )
+    preload(ctx, pset)
     return pset, solver, ctx
 
 
@@ -96,6 +124,30 @@ def mib(value):
     return value / (1024.0 * 1024.0)
 
 
+def print_accuracy(label, pset, reference):
+    print(label)
+    print("  X max abs :", np.max(np.abs(pset.X - reference.X)))
+    print("  X mean abs:", np.mean(np.abs(pset.X - reference.X)))
+    print("  X allclose:", np.allclose(pset.X, reference.X, rtol=1e-4, atol=1e-4))
+    print("  V max abs :", np.max(np.abs(pset.V - reference.V)))
+    print("  V mean abs:", np.mean(np.abs(pset.V - reference.V)))
+    print("  V allclose:", np.allclose(pset.V, reference.V, rtol=1e-4, atol=1e-4))
+
+
+def print_transfers(label, stats):
+    print(label)
+    print("  H2D calls :", stats["h2d_calls"])
+    print("  H2D MiB   : %.3f" % mib(stats["h2d_bytes"]))
+    print("  D2H calls :", stats["d2h_calls"])
+    print("  D2H MiB   : %.3f" % mib(stats["d2h_bytes"]))
+    print("  X D2H     :", stats["by_buffer"]["X"]["d2h_calls"])
+    print("  V D2H     :", stats["by_buffer"]["V"]["d2h_calls"])
+    print("  A H2D/D2H : %d/%d" % (
+        stats["by_buffer"]["A"]["h2d_calls"],
+        stats["by_buffer"]["A"]["d2h_calls"],
+    ))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-n", "--particles", type=int, default=4096)
@@ -106,43 +158,37 @@ def main():
 
     x0, v0 = build_initial_state(args.particles, args.seed)
     p_cpu, cpu = build_cpu(x0, v0, args.dt)
-    p_gpu, gpu, ctx = build_gpu(x0, v0, args.dt)
+    p_generic, generic, generic_ctx = build_gpu_generic(x0, v0, args.dt)
+    p_fused, fused, fused_ctx = build_gpu_fused(x0, v0, args.dt)
 
     cpu_wall = run_steps(cpu, args.steps)
-    gpu_wall = run_steps(gpu, args.steps)
-    hot_stats = ctx.transfer_stats
+    generic_wall = run_steps(generic, args.steps)
+    generic_stats = generic_ctx.transfer_stats
+    fused_wall = run_steps(fused, args.steps)
+    fused_stats = fused_ctx.transfer_stats
 
-    # V intentionally remains resident during the timed region. Synchronize it
-    # only now for the numerical comparison.
-    gpu.sync_to_host(velocity=True)
+    # Velocity intentionally remains resident during each timed region.
+    generic.sync_to_host(velocity=True)
+    fused.sync_to_host(velocity=True)
 
-    print("Particles :", args.particles)
-    print("Steps     :", args.steps)
-    print("Sim time  :", args.steps * args.dt)
+    print("Particles   :", args.particles)
+    print("Steps       :", args.steps)
+    print("Sim time    :", args.steps * args.dt)
     print()
-    print("CPU wall  : %.6f s" % cpu_wall)
-    print("GPU wall  : %.6f s" % gpu_wall)
-    print("CPU/GPU   : %.3fx" % (cpu_wall / gpu_wall))
+    print("CPU wall    : %.6f s" % cpu_wall)
+    print("GPU generic : %.6f s" % generic_wall)
+    print("GPU fused   : %.6f s" % fused_wall)
+    print("CPU/generic : %.3fx" % (cpu_wall / generic_wall))
+    print("CPU/fused   : %.3fx" % (cpu_wall / fused_wall))
+    print("Generic/fused: %.3fx" % (generic_wall / fused_wall))
     print()
-    print("X max abs :", np.max(np.abs(p_gpu.X - p_cpu.X)))
-    print("X mean abs:", np.mean(np.abs(p_gpu.X - p_cpu.X)))
-    print("X allclose:", np.allclose(p_gpu.X, p_cpu.X, rtol=1e-4, atol=1e-4))
+    print_accuracy("Generic accuracy vs CPU:", p_generic, p_cpu)
     print()
-    print("V max abs :", np.max(np.abs(p_gpu.V - p_cpu.V)))
-    print("V mean abs:", np.mean(np.abs(p_gpu.V - p_cpu.V)))
-    print("V allclose:", np.allclose(p_gpu.V, p_cpu.V, rtol=1e-4, atol=1e-4))
+    print_accuracy("Fused accuracy vs CPU:", p_fused, p_cpu)
     print()
-    print("Steady-state OpenCL transfers during timed region:")
-    print("  H2D calls :", hot_stats["h2d_calls"])
-    print("  H2D MiB   : %.3f" % mib(hot_stats["h2d_bytes"]))
-    print("  D2H calls :", hot_stats["d2h_calls"])
-    print("  D2H MiB   : %.3f" % mib(hot_stats["d2h_bytes"]))
-    print("  X D2H     :", hot_stats["by_buffer"]["X"]["d2h_calls"])
-    print("  V D2H     :", hot_stats["by_buffer"]["V"]["d2h_calls"])
-    print("  A H2D/D2H : %d/%d" % (
-        hot_stats["by_buffer"]["A"]["h2d_calls"],
-        hot_stats["by_buffer"]["A"]["d2h_calls"],
-    ))
+    print_transfers("Generic steady-state transfers:", generic_stats)
+    print()
+    print_transfers("Fused steady-state transfers:", fused_stats)
 
 
 if __name__ == "__main__":
