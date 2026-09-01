@@ -5,14 +5,6 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import numpy as np
 
@@ -37,21 +29,11 @@ OCLC_M = np.uint8(0b00010000)
 class OpenCLcontext(object):
     """Shared OpenCL context and particle buffers.
 
-    Besides owning the OpenCL arrays, the modern implementation tracks which
-    side currently contains the newest value for X/V/A/M.  This allows forces
-    and integrators sharing one context to avoid uploading a buffer that is
-    already current on the device.
-
-    Buffer state is one of:
-
-    ``host``
-        The host NumPy array is authoritative and must be uploaded before a
-        device consumer uses it.
-    ``device``
-        The OpenCL array is authoritative and must be downloaded before a host
-        consumer uses it.
-    ``sync``
-        Host and device contain the same value.
+    The modern implementation tracks which side contains the newest value for
+    X/V/A/M.  It can also create a context sharing the currently-active OpenGL
+    context.  In GL-sharing mode normal particle arrays remain ordinary OpenCL
+    buffers; a renderer may create :class:`pyopencl.GLBuffer` objects in the
+    same context and copy positions VRAM-to-VRAM without crossing PCIe.
     """
 
     _VALID_NAMES = ("X", "V", "A", "M")
@@ -62,6 +44,7 @@ class OpenCLcontext(object):
         dim,
         mask=(OCLC_X | OCLC_V | OCLC_A | OCLC_M),
         dtype=np.float32,
+        gl_sharing=False,
     ):
         if cl is None:
             raise RuntimeError("PyOpenCL is not available") from _PYOPENCL_IMPORT_ERROR
@@ -74,10 +57,23 @@ class OpenCLcontext(object):
         self.__size = int(size)
         self.__dim = int(dim)
         self.__opt_arrays = {}
+        self.__gl_sharing = bool(gl_sharing)
+        self.__platform = None
+        self.__device = None
 
         try:
-            self.__cl_context = cl.create_some_context(interactive=False)
+            if self.__gl_sharing:
+                self.__cl_context = self._create_gl_sharing_context()
+            else:
+                self.__cl_context = cl.create_some_context(interactive=False)
+                if self.__cl_context.devices:
+                    self.__device = self.__cl_context.devices[0]
+                    self.__platform = self.__device.platform
         except Exception as exc:
+            if self.__gl_sharing:
+                raise RuntimeError(
+                    "No OpenCL context could share the active OpenGL context"
+                ) from exc
             raise RuntimeError("No usable OpenCL context could be created") from exc
 
         self.__cl_queue = cl.CommandQueue(
@@ -90,8 +86,6 @@ class OpenCLcontext(object):
         self.__A_cla = self._new_array((self.__size, self.__dim)) if mask & OCLC_A else None
         self.__M_cla = self._new_array((self.__size, 1)) if mask & OCLC_M else None
 
-        # At construction the corresponding particle arrays live on the host.
-        # Device storage is allocated but not initialized from those arrays yet.
         self.__buffer_state = {
             "X": "host" if self.__X_cla is not None else None,
             "V": "host" if self.__V_cla is not None else None,
@@ -99,6 +93,35 @@ class OpenCLcontext(object):
             "M": "host" if self.__M_cla is not None else None,
         }
         self.reset_transfer_stats()
+
+    def _create_gl_sharing_context(self):
+        if not hasattr(cl, "have_gl") or not cl.have_gl():
+            raise RuntimeError("PyOpenCL was built without OpenGL interoperability")
+
+        sharing = list(cl.get_gl_sharing_context_properties())
+        last_error = None
+        for platform in cl.get_platforms():
+            for device in platform.get_devices():
+                if "cl_khr_gl_sharing" not in device.extensions.split():
+                    continue
+
+                properties = [
+                    (cl.context_properties.PLATFORM, platform),
+                    *sharing,
+                ]
+                try:
+                    context = cl.Context(devices=[device], properties=properties)
+                except Exception as exc:
+                    last_error = exc
+                    continue
+
+                self.__platform = platform
+                self.__device = device
+                return context
+
+        if last_error is not None:
+            raise RuntimeError("No CL/GL sharing device accepted the active GL context") from last_error
+        raise RuntimeError("No OpenCL device advertises cl_khr_gl_sharing")
 
     def _new_array(self, shape, dtype=None):
         if dtype is None:
@@ -197,6 +220,28 @@ class OpenCLcontext(object):
         self.mark_host_modified(name)
         return self.sync_to_device(name, host_array)
 
+    def create_gl_buffer(self, gl_buffer_id, flags=None):
+        """Wrap an OpenGL buffer object in this GL-sharing OpenCL context."""
+        if not self.__gl_sharing:
+            raise RuntimeError("This OpenCL context was not created for GL sharing")
+        if flags is None:
+            flags = cl.mem_flags.READ_WRITE
+        return cl.GLBuffer(self.__cl_context, flags, int(gl_buffer_id))
+
+    def acquire_gl_objects(self, objects, wait_for=None):
+        if not self.__gl_sharing:
+            raise RuntimeError("This OpenCL context was not created for GL sharing")
+        return cl.enqueue_acquire_gl_objects(
+            self.__cl_queue, list(objects), wait_for=wait_for
+        )
+
+    def release_gl_objects(self, objects, wait_for=None):
+        if not self.__gl_sharing:
+            raise RuntimeError("This OpenCL context was not created for GL sharing")
+        return cl.enqueue_release_gl_objects(
+            self.__cl_queue, list(objects), wait_for=wait_for
+        )
+
     def add_array_by_name(self, key, size=None, dim=None, dtype=None):
         if dim is None:
             dim = self.__dim
@@ -257,3 +302,18 @@ class OpenCLcontext(object):
         return self.__M_cla
 
     M_cla = property(get_M_cla, doc="return the masses array")
+
+    def get_gl_sharing(self):
+        return self.__gl_sharing
+
+    gl_sharing = property(get_gl_sharing)
+
+    def get_device(self):
+        return self.__device
+
+    device = property(get_device)
+
+    def get_platform(self):
+        return self.__platform
+
+    platform = property(get_platform)
