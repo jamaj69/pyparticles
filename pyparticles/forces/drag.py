@@ -57,7 +57,7 @@ class Drag( fr.Force ) :
         self.__V = np.zeros( ( size , 1 ) )
         
         self.__M = np.zeros( ( size , 1 ) )
-        if m != None :
+        if m is not None :
             self.set_masses( m )
         
         
@@ -112,10 +112,10 @@ class DragOCL( fr.Force ) :
 
     def __init__(self , size , dim=3 , m=None , Consts=1.0 , ocl_context=None ):
         
-        self.__dim = np.int( dim )
-        self.__size = np.int( size )
+        self.__dim = int( dim )
+        self.__size = int( size )
         
-        if ocl_context == None :
+        if ocl_context is None :
             self.__occ = occ.OpenCLcontext( size , dim , ( occ.OCLC_V | occ.OCLC_A | occ.OCLC_M )  )
         else :
             self.__occ = ocl_context        
@@ -127,7 +127,7 @@ class DragOCL( fr.Force ) :
         self.__A = np.zeros( ( size , dim ) , dtype=self.__occ.dtype )
         self.__F = np.zeros( ( size , dim ) , dtype=self.__occ.dtype )
                         
-        if m != None :
+        if m is not None :
             self.set_masses( m )
         
         self.__init_prog_cl()
@@ -175,7 +175,6 @@ class DragOCL( fr.Force ) :
 
     def getA(self):
         return self.__A
-    
     A = property( getA )
 
     def getF(self):
