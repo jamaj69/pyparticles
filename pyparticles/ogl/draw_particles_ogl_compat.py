@@ -11,9 +11,11 @@ module preserves its public interface while normalizing scalar values and
 client arrays for current PyOpenGL and NumPy releases.
 """
 
+import ctypes
 import numpy as np
 
 from OpenGL.GL import (
+    GL_ARRAY_BUFFER,
     GL_COLOR_ARRAY,
     GL_FLOAT,
     GL_LINES,
@@ -21,6 +23,7 @@ from OpenGL.GL import (
     GL_UNSIGNED_INT,
     GL_VERTEX_ARRAY,
     glBegin,
+    glBindBuffer,
     glCallList,
     glColor4f,
     glColorPointer,
@@ -67,6 +70,10 @@ def charged_particles_vect_color(RGBA, pset):
 class DrawParticlesGL(legacy.DrawParticlesGL):
     """Legacy particle renderer with modern scalar and buffer handling."""
 
+    def __init__(self, *args, **kwargs):
+        super(DrawParticlesGL, self).__init__(*args, **kwargs)
+        self.__shared_position_vbo = None
+
     def __del__(self):
         # OpenGL contexts are frequently already gone during interpreter
         # teardown.  The driver releases display-list resources with context
@@ -89,6 +96,22 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
         self._DrawParticlesGL__vect_color_fun_fl = False
 
     vect_color_fun = property(_get_vect_color_fun, _set_vect_color_fun)
+
+    def set_shared_position_vbo(self, vbo):
+        """Use *vbo* as the vectorized particle position source.
+
+        ``None`` restores the normal host NumPy client-array path.  The VBO is
+        expected to contain tightly-packed float32 XYZ triples in particle
+        order and remains owned by the CL/GL bridge that created it.
+        """
+        self.__shared_position_vbo = None if vbo is None else int(vbo)
+
+    def get_shared_position_vbo(self):
+        return self.__shared_position_vbo
+
+    shared_position_vbo = property(
+        get_shared_position_vbo, set_shared_position_vbo
+    )
 
     def draw_particle(self, pset, i):
         mass = _scalar(pset.M[i])
@@ -134,24 +157,40 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
         glPopMatrix()
 
     def _draw_vectorized(self):
-        vertices = np.ascontiguousarray(
-            np.asarray(self.pset.X) / self.pset.unit,
-            dtype=np.float32,
-        )
-
         vect_color_fun = self._DrawParticlesGL__vect_color_fun
         if vect_color_fun is not None:
             colors = np.empty((self.pset.size, 4), dtype=np.float32)
             vect_color_fun(colors, self.pset)
             colors = np.ascontiguousarray(colors, dtype=np.float32)
+            # Client color memory must be captured while no array buffer is
+            # bound; otherwise the pointer is interpreted as a VBO offset.
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
             glEnableClientState(GL_COLOR_ARRAY)
             glColorPointer(4, GL_FLOAT, 0, colors)
         else:
             colors = None
 
         glEnableClientState(GL_VERTEX_ARRAY)
-        glVertexPointer(3, GL_FLOAT, 0, vertices)
-        glDrawArrays(GL_POINTS, 0, self.pset.size)
+        if self.__shared_position_vbo is None:
+            vertices = np.ascontiguousarray(
+                np.asarray(self.pset.X) / self.pset.unit,
+                dtype=np.float32,
+            )
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glVertexPointer(3, GL_FLOAT, 0, vertices)
+            glDrawArrays(GL_POINTS, 0, self.pset.size)
+        else:
+            # Positions are already in GPU memory.  Apply the unit conversion
+            # as a model-view scale instead of materializing a host array.
+            glBindBuffer(GL_ARRAY_BUFFER, self.__shared_position_vbo)
+            glVertexPointer(3, GL_FLOAT, 0, ctypes.c_void_p(0))
+            glPushMatrix()
+            unit_scale = 1.0 / float(self.pset.unit)
+            glScalef(unit_scale, unit_scale, unit_scale)
+            glDrawArrays(GL_POINTS, 0, self.pset.size)
+            glPopMatrix()
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
         glDisableClientState(GL_VERTEX_ARRAY)
 
         if colors is not None:
@@ -181,6 +220,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
                     log_array / self.pset.unit,
                     dtype=np.float32,
                 )
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
                 glVertexPointer(3, GL_FLOAT, 0, vertices)
                 glDrawElements(
                     GL_LINES,
