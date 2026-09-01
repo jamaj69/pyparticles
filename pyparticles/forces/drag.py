@@ -89,6 +89,7 @@ class DragOCL(fr.Force):
             __global const float *V,
             __global const float *M,
                            float  K,
+                             int  accumulate,
             __global       float *A)
         {
             int i = get_global_id(0);
@@ -100,9 +101,22 @@ class DragOCL(fr.Force):
                 V[i0]*V[i0] + V[i1]*V[i1] + V[i2]*V[i2]
             );
 
-            A[i0] = (-0.5f * K * speed * V[i0]) / M[i];
-            A[i1] = (-0.5f * K * speed * V[i1]) / M[i];
-            A[i2] = (-0.5f * K * speed * V[i2]) / M[i];
+            float ax = (-0.5f * K * speed * V[i0]) / M[i];
+            float ay = (-0.5f * K * speed * V[i1]) / M[i];
+            float az = (-0.5f * K * speed * V[i2]) / M[i];
+
+            if (accumulate)
+            {
+                A[i0] += ax;
+                A[i1] += ay;
+                A[i2] += az;
+            }
+            else
+            {
+                A[i0] = ax;
+                A[i1] = ay;
+                A[i2] = az;
+            }
         }
         """
         self.__cl_program = cl.Program(self.__occ.CL_context, source).build()
@@ -110,13 +124,12 @@ class DragOCL(fr.Force):
 
     def set_masses(self, m):
         self.__M[:] = np.asarray(m, dtype=self.__dtype)
-        self.__occ.M_cla.set(self.__M, queue=self.__occ.CL_queue)
+        self.__occ.set_from_host("M", self.__M)
 
-    def update_force(self, pset):
-        self.__occ.V_cla.set(
-            np.asarray(pset.V, dtype=self.__dtype),
-            queue=self.__occ.CL_queue,
-        )
+    def update_force_device(self, pset, accumulate=False, host_authoritative=False):
+        if host_authoritative:
+            self.__occ.mark_host_modified("V")
+        self.__occ.sync_to_device("V", pset.V)
 
         self.__drag_kernel(
             self.__occ.CL_queue,
@@ -125,10 +138,15 @@ class DragOCL(fr.Force):
             self.__occ.V_cla.data,
             self.__occ.M_cla.data,
             self.__K,
+            np.int32(bool(accumulate)),
             self.__occ.A_cla.data,
         )
+        self.__occ.mark_device_modified("A")
+        return self.__occ.A_cla
 
-        self.__occ.A_cla.get(self.__occ.CL_queue, self.__A)
+    def update_force(self, pset):
+        self.update_force_device(pset, accumulate=False, host_authoritative=True)
+        self.__occ.sync_to_host("A", self.__A)
         return self.__A
 
     def getA(self):
@@ -137,6 +155,13 @@ class DragOCL(fr.Force):
     A = property(getA)
 
     def getF(self):
+        # Keep the legacy host property useful even after a device-only update.
+        self.__occ.sync_to_host("A", self.__A)
         return self.__A * self.__M
 
     F = property(getF)
+
+    def get_ocl_context(self):
+        return self.__occ
+
+    ocl_context = property(get_ocl_context)
