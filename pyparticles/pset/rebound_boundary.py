@@ -28,6 +28,14 @@ class ReboundBoundary(bd.Boundary):
             self.__N[4, :] = np.array([0, 0, 1])
             self.__N[5, :] = np.array([0, 0, -1])
 
+    def needs_update(self, p_set):
+        for i in range(self.dim):
+            if np.any(p_set.X[:, i] < self.bound[i, 0]):
+                return True
+            if np.any(p_set.X[:, i] > self.bound[i, 1]):
+                return True
+        return False
+
     def boundary(self, p_set):
         v_mi = np.zeros(3)
         v_mx = np.zeros(3)
