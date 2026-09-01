@@ -98,7 +98,15 @@ def fountain():
     multi.set_masses(pset.M)
 
     if ocl_ok:
-        solver = els.EulerSolverOCL(multi, pset, dt, ocl_context=occx)
+        # The renderer needs X but not V. DefaultBoundary advertises whether a
+        # frame actually needs host V, so velocity normally remains in VRAM.
+        solver = els.EulerSolverOCL(
+            multi,
+            pset,
+            dt,
+            ocl_context=occx,
+            sync_velocity=False,
+        )
     else:
         solver = els.EulerSolver(multi, pset, dt)
 
