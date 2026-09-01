@@ -15,14 +15,14 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import numpy as np
-import scipy.sparse.dok as dok
+from scipy.sparse import dok_matrix
 
 import pyparticles.pset.constraint as ct
 
 
 class ConstrainedForceInteractions(ct.Constraint):
     def __init__(self, pset=None):
-        self.__S = dok.dok_matrix((1, 1), dtype=np.byte)
+        self.__S = dok_matrix((1, 1), dtype=np.byte)
         super(ConstrainedForceInteractions, self).__init__(pset=None)
         if pset is not None:
             self.pset = pset

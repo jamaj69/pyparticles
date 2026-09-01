@@ -15,7 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import numpy as np
-import scipy.sparse.dok as dok
+from scipy.sparse import dok_matrix
 
 import pyparticles.forces.force_constrained as fcr
 
@@ -32,7 +32,7 @@ class LinearSpringConstrained(fcr.ForceConstrained):
 
         self.__A = np.zeros((size, dim))
         self.__F = np.zeros((size, dim))
-        self.__Fm = dok.dok_matrix((size, size), dtype=float)
+        self.__Fm = dok_matrix((size, size), dtype=float)
         self.__M = np.zeros((size, 1))
 
         if m is not None:
