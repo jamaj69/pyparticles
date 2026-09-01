@@ -70,9 +70,6 @@ class Drag( fr.Force ) :
         
         self.__V.T[:] = np.sqrt( np.sum( pset.V[:]**2 , 1 )  )
         
-        #print( self.__V[:] )
-        #print( pset.V[:] )
-        
         self.__F[:] =  -1./2. * self.__V[:] * pset.V[:] * self.__G[:]
         
         self.__A =  self.__F[:] / self.__M
@@ -82,13 +79,11 @@ class Drag( fr.Force ) :
 
     def getA(self):
         return self.__A
-    
     A = property( getA )
 
 
     def getF(self):
         return self.__A * self.__M[:]
-    
     F = property( getF )
     
 
@@ -153,6 +148,7 @@ class DragOCL( fr.Force ) :
         """
         
         self.__cl_program = cl.Program( self.__occ.CL_context , self.__drag_prg ).build()
+        self.__drag_kernel = cl.Kernel( self.__cl_program , "drag" )
     
     def set_masses( self , m ):
         self.__occ.M_cla.set( self.__dtype( m ) , queue=self.__occ.CL_queue )
@@ -162,11 +158,11 @@ class DragOCL( fr.Force ) :
         
         self.__occ.V_cla.set( self.__dtype( pset.V ) , queue=self.__occ.CL_queue )
         
-        self.__cl_program.drag( self.__occ.CL_queue , ( self.__size , ) , None , 
-                                self.__occ.V_cla.data ,
-                                self.__occ.M_cla.data , 
-                                self.__K , 
-                                self.__occ.A_cla.data )
+        self.__drag_kernel( self.__occ.CL_queue , ( self.__size , ) , None , 
+                            self.__occ.V_cla.data ,
+                            self.__occ.M_cla.data , 
+                            self.__K , 
+                            self.__occ.A_cla.data )
     
         self.__occ.A_cla.get( self.__occ.CL_queue , self.__A )
         
