@@ -40,13 +40,26 @@ def _env_true(name):
     )
 
 
-def _event_seconds(event):
+def _event_profile_seconds(event):
+    result = {
+        "queue_s": 0.0,
+        "exec_s": 0.0,
+        "total_s": 0.0,
+    }
     if event is None:
-        return 0.0
+        return result
     try:
-        return max(0.0, (event.profile.end - event.profile.start) * 1.0e-9)
+        queued = int(event.profile.queued)
+        start = int(event.profile.start)
+        end = int(event.profile.end)
     except Exception:
-        return 0.0
+        return result
+
+    scale = 1.0e-9
+    result["queue_s"] = max(0, start - queued) * scale
+    result["exec_s"] = max(0, end - start) * scale
+    result["total_s"] = max(0, end - queued) * scale
+    return result
 
 
 def default_pos(pset, indx):
@@ -104,7 +117,6 @@ def fountain():
     bd = (-100.0, 100.0, -100.0, 100.0, 0.0, 100.0)
 
     if ocl_ok:
-        # Reliable fallback: fused/resident compute with host X synchronization.
         occx = occ.OpenCLcontext(
             pset.size,
             pset.dim,
@@ -193,21 +205,30 @@ def fountain():
                 shared_ctx.set_from_host("X", pset.X)
                 shared_ctx.set_from_host("V", pset.V)
 
-                # Commit the new path only after all GL/CL resources and
-                # kernels have been created successfully.
                 animation.ode_solver = shared_solver
-                pset.set_boundary(None)  # boundary/reset is fused on the GPU
+                pset.set_boundary(None)
 
                 if profile_clgl:
+                    animation.draw_particles.set_gpu_timing_enabled(True)
+
                     metric_names = (
                         "frame_wall_s",
                         "physics_gpu_s",
+                        "physics_queue_s",
+                        "physics_total_s",
+                        "gl_draw_gpu_s",
                         "gl_fence_wait_wall_s",
                         "gl_finish_fallback_wall_s",
                         "fence_immediate",
                         "acquire_gpu_s",
+                        "acquire_queue_s",
+                        "acquire_total_s",
                         "copy_gpu_s",
+                        "copy_queue_s",
+                        "copy_total_s",
                         "release_gpu_s",
+                        "release_queue_s",
+                        "release_total_s",
                         "release_wait_wall_s",
                         "bridge_wall_s",
                         "draw_submit_cpu_s",
@@ -243,6 +264,9 @@ def fountain():
                                 / (1024.0 ** 3)
                             )
 
+                        gl_samples = len(samples["gl_draw_gpu_s"])
+                        timing_stats = animation.draw_particles.gpu_timing_stats
+
                         print("")
                         print(
                             "=== CL/GL profile: %d frames, %d particles ==="
@@ -250,7 +274,20 @@ def fountain():
                         )
                         print("frame wall avg       : %8.3f ms  (%7.1f FPS)" % (frame_ms, fps))
                         print("frame wall p95       : %8.3f ms" % p95_ms)
+                        print("physics queue->start : %8.3f ms" % (avg["physics_queue_s"] * 1000.0))
                         print("physics fused GPU    : %8.3f ms" % (avg["physics_gpu_s"] * 1000.0))
+                        print("physics queued->end  : %8.3f ms" % (avg["physics_total_s"] * 1000.0))
+                        if gl_samples:
+                            print("glDrawArrays GPU     : %8.3f ms  (%d async samples)" % (
+                                avg["gl_draw_gpu_s"] * 1000.0, gl_samples
+                            ))
+                        else:
+                            print("glDrawArrays GPU     :      n/a   (no async samples ready)")
+                        print("GL timer queries     : pending=%d skipped=%d available=%s" % (
+                            timing_stats["pending"],
+                            timing_stats["skipped"],
+                            timing_stats["available"],
+                        ))
                         print("GL fence wait wall   : %8.3f ms" % (
                             avg["gl_fence_wait_wall_s"] * 1000.0
                         ))
@@ -260,18 +297,24 @@ def fountain():
                         print("glFinish fallback    : %8.3f ms" % (
                             avg["gl_finish_fallback_wall_s"] * 1000.0
                         ))
-                        print("CL acquire GPU       : %8.3f ms" % (avg["acquire_gpu_s"] * 1000.0))
+                        print("CL acquire queue     : %8.3f ms" % (avg["acquire_queue_s"] * 1000.0))
+                        print("CL acquire exec      : %8.3f ms" % (avg["acquire_gpu_s"] * 1000.0))
+                        print("CL acquire total     : %8.3f ms" % (avg["acquire_total_s"] * 1000.0))
+                        print("CL copy queue        : %8.3f ms" % (avg["copy_queue_s"] * 1000.0))
                         print("X -> VBO copy GPU    : %8.3f ms  (%6.2f GiB/s)" % (
                             avg["copy_gpu_s"] * 1000.0, copy_bw
                         ))
-                        print("CL release GPU       : %8.3f ms" % (avg["release_gpu_s"] * 1000.0))
+                        print("CL copy total        : %8.3f ms" % (avg["copy_total_s"] * 1000.0))
+                        print("CL release queue     : %8.3f ms" % (avg["release_queue_s"] * 1000.0))
+                        print("CL release exec      : %8.3f ms" % (avg["release_gpu_s"] * 1000.0))
+                        print("CL release total     : %8.3f ms" % (avg["release_total_s"] * 1000.0))
                         print("release.wait wall    : %8.3f ms" % (avg["release_wait_wall_s"] * 1000.0))
                         print("CL/GL bridge wall    : %8.3f ms" % (avg["bridge_wall_s"] * 1000.0))
                         print("glDrawArrays submit  : %8.3f ms CPU" % (
                             avg["draw_submit_cpu_s"] * 1000.0
                         ))
                         print(
-                            "note: GPU event times and wall waits overlap; "
+                            "note: GL/CL GPU timings and wall waits overlap; "
                             "do not add these rows."
                         )
                         print("")
@@ -280,6 +323,10 @@ def fountain():
                             values[:] = []
 
                     def profiled_bridge_update(_animation):
+                        # Poll timer-query results from earlier GL draws.  This
+                        # uses QUERY_RESULT_AVAILABLE first and never waits.
+                        ready_gl_draws = animation.draw_particles.drain_gpu_draw_times()
+
                         bridge.update_from_device()
                         bridge_end = time.perf_counter()
 
@@ -292,18 +339,29 @@ def fountain():
                             return
 
                         bp = bridge.last_profile
+                        physics_profile = _event_profile_seconds(
+                            shared_force.last_step_event
+                        )
                         samples = profile_state["samples"]
                         samples["frame_wall_s"].append(bridge_end - last_end)
-                        samples["physics_gpu_s"].append(
-                            _event_seconds(shared_force.last_step_event)
-                        )
+                        samples["physics_gpu_s"].append(physics_profile["exec_s"])
+                        samples["physics_queue_s"].append(physics_profile["queue_s"])
+                        samples["physics_total_s"].append(physics_profile["total_s"])
+                        samples["gl_draw_gpu_s"].extend(ready_gl_draws)
+
                         for name in (
                             "gl_fence_wait_wall_s",
                             "gl_finish_fallback_wall_s",
                             "fence_immediate",
                             "acquire_gpu_s",
+                            "acquire_queue_s",
+                            "acquire_total_s",
                             "copy_gpu_s",
+                            "copy_queue_s",
+                            "copy_total_s",
                             "release_gpu_s",
+                            "release_queue_s",
+                            "release_total_s",
                             "release_wait_wall_s",
                             "bridge_wall_s",
                         ):
@@ -318,6 +376,7 @@ def fountain():
                         "CL/GL profiling enabled: warmup=%d, report every %d frames"
                         % (profile_warmup, profile_frames)
                     )
+                    print("OpenGL GPU timing: asynchronous GL_TIME_ELAPSED queries")
                 else:
                     profile_state = None
                     emit_profile = None
@@ -326,12 +385,13 @@ def fountain():
                     )
 
                 def cleanup_interop(_animation, _bridge=bridge, _fallback=solver):
-                    # Drop every reference chain leading to the GL-sharing
-                    # context while the GLX context is still current.  On the
-                    # NVIDIA driver, leaving shared_solver alive until after
-                    # glutLeaveMainLoop() can crash native teardown.
                     _animation.set_post_step_callback(None)
                     if profile_clgl and emit_profile is not None:
+                        # Collect only already-available timer results.  Cleanup
+                        # must not block merely to improve profiling statistics.
+                        profile_state["samples"]["gl_draw_gpu_s"].extend(
+                            _animation.draw_particles.drain_gpu_draw_times()
+                        )
                         emit_profile(force=True)
                     _bridge.close()
                     _animation.ode_solver = _fallback
