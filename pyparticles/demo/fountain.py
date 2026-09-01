@@ -20,11 +20,18 @@ import pyparticles.forces.multiple_force as mf
 from pyparticles.forces.fused_const_drag import FusedConstDragOCL
 
 import pyparticles.animation.animated_ogl_compat as aogl
+from pyparticles.ogl.opencl_gl_vbo import OpenCLGLPositionBuffer
 
 from pyparticles.utils.pypart_global import test_pyopencl
 
+try:
+    import pyopencl as cl
+except ImportError:
+    cl = None
+
 
 def default_pos(pset, indx):
+    """Historical host fallback for systems without CL/GL sharing."""
     t = default_pos.sim_time.time
 
     pset.X[indx, :] = 0.01 * np.random.rand(len(indx), pset.dim).astype(pset.dtype)
@@ -38,7 +45,7 @@ def default_pos(pset, indx):
 
 
 def fountain():
-    """Fountain demo."""
+    """Fountain demo with resident/fused OpenCL and optional CL/GL interop."""
     steps = 10000000
     dt = 0.005
     pcnt = 100000
@@ -61,7 +68,10 @@ def fountain():
     pset.M[:] = 0.1
     pset.X[:, 2] = 0.7 * np.random.rand(pset.size)
 
+    bd = (-100.0, 100.0, -100.0, 100.0, 0.0, 100.0)
+
     if ocl_ok:
+        # Reliable fallback: fused/resident compute with host X synchronization.
         occx = occ.OpenCLcontext(
             pset.size,
             pset.dim,
@@ -75,14 +85,13 @@ def fountain():
             drag_const=0.01,
             ocl_context=occx,
         )
-        # The renderer needs X but not V. DefaultBoundary advertises whether a
-        # frame actually needs host V, so velocity normally remains in VRAM.
         solver = els.EulerSolverOCL(
             force,
             pset,
             dt,
             ocl_context=occx,
             sync_velocity=False,
+            sync_positions=True,
         )
     else:
         grav = cf.ConstForce(
@@ -98,8 +107,6 @@ def fountain():
         solver = els.EulerSolver(force, pset, dt)
 
     default_pos.sim_time = solver.get_sim_time()
-
-    bd = (-100.0, 100.0, -100.0, 100.0, 0.0, 100.0)
     pset.set_boundary(db.DefaultBoundary(bd, dim=3, defualt_pos=default_pos))
 
     a = aogl.AnimatedGl()
@@ -108,5 +115,76 @@ def fountain():
     a.steps = steps
     a.draw_particles.set_draw_model(a.draw_particles.DRAW_MODEL_VECTOR)
     a.init_rotation(-80, [0.7, 0.05, 0])
+
+    gl_interop_possible = (
+        ocl_ok
+        and cl is not None
+        and hasattr(cl, "have_gl")
+        and cl.have_gl()
+    )
+
+    if gl_interop_possible:
+        def enable_cl_gl_interop(animation):
+            bridge = None
+            try:
+                shared_ctx = occ.OpenCLcontext(
+                    pset.size,
+                    pset.dim,
+                    occ.OCLC_X | occ.OCLC_V | occ.OCLC_A | occ.OCLC_M,
+                    gl_sharing=True,
+                )
+                bridge = OpenCLGLPositionBuffer(shared_ctx, pset)
+
+                shared_force = FusedConstDragOCL(
+                    pset.size,
+                    dim=pset.dim,
+                    m=pset.M,
+                    u_force=(0.0, 0.0, -10.0),
+                    drag_const=0.01,
+                    ocl_context=shared_ctx,
+                    fountain_bounds=bd,
+                )
+                shared_solver = els.EulerSolverOCL(
+                    shared_force,
+                    pset,
+                    dt,
+                    ocl_context=shared_ctx,
+                    sync_velocity=False,
+                    sync_positions=False,
+                )
+
+                shared_ctx.set_from_host("X", pset.X)
+                shared_ctx.set_from_host("V", pset.V)
+
+                # Commit the new path only after all GL/CL resources and
+                # kernels have been created successfully.
+                animation.ode_solver = shared_solver
+                animation.draw_particles.set_shared_position_vbo(bridge.vbo)
+                pset.set_boundary(None)  # boundary/reset is fused on the GPU
+                animation.set_post_step_callback(
+                    lambda _animation: bridge.update_from_device()
+                )
+                animation.add_cleanup_callback(
+                    lambda _animation: bridge.close()
+                )
+
+                print(
+                    "OpenCL/OpenGL interop enabled: "
+                    "positions render without host copies"
+                )
+                print("Interop device:", shared_ctx.device.name)
+            except Exception as exc:
+                if bridge is not None:
+                    try:
+                        bridge.close()
+                    except Exception:
+                        pass
+                print(
+                    "OpenCL/OpenGL interop unavailable; "
+                    "using host-sync renderer: %s" % exc
+                )
+
+        a.set_gl_context_ready_callback(enable_cl_gl_interop)
+
     a.build_animation()
     a.start()
