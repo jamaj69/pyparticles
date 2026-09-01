@@ -31,7 +31,7 @@ class MultipleForce(object):
         self.__A = np.zeros(( size , dim ))
         self.__F = np.zeros(( size , dim ))
         
-        if m != None :
+        if m is not None :
             self.set_masses( m )
     
         
