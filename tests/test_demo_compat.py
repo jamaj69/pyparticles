@@ -60,6 +60,24 @@ class DemoCompatibilityTests(unittest.TestCase):
         self.assertIs(draw.color_fun, color_fun)
         self.assertIs(draw.vect_color_fun, vect_fun)
 
+    def test_draw_render_benchmark_modes_work_without_gl_context(self):
+        draw = DrawParticlesGL()
+        expected = {
+            "legacy",
+            "no_msaa",
+            "no_fog",
+            "no_blend",
+            "no_alpha",
+            "no_depth",
+            "fast_points",
+        }
+        self.assertEqual(set(draw.render_benchmark_modes), expected)
+        for mode in sorted(expected):
+            draw.render_benchmark_mode = mode
+            self.assertEqual(draw.render_benchmark_mode, mode)
+        with self.assertRaises(ValueError):
+            draw.render_benchmark_mode = "not-a-mode"
+
     def test_logger_enabled_flags_are_real_booleans(self):
         pset = ParticlesSet(3)
         logger = Logger(pset, 8, log_X=True, log_V=False)
