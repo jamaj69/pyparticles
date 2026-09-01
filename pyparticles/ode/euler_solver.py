@@ -32,9 +32,9 @@ class EulerSolverOCL(os.OdeSolver):
     """Euler integrator with persistent OpenCL X/V/A buffers.
 
     ``sync_velocity`` defaults to True to preserve the historical API where
-    ``pset.V`` is current immediately after every step.  Rendering-only demos
-    that never inspect host velocities may disable it and keep V exclusively
-    on the device between steps.
+    ``pset.V`` is current immediately after every step. Rendering-only demos
+    may disable it. Boundaries implementing ``needs_update`` then trigger a V
+    download only on frames where a particle actually crosses the domain.
     """
 
     def __init__(self, force, p_set, dt, ocl_context=None, sync_velocity=True):
@@ -90,12 +90,8 @@ class EulerSolverOCL(os.OdeSolver):
 
     def __step__(self, dt):
         if self._has_device_force():
-            # Device forces consume the resident X/V buffers directly and
-            # leave the complete acceleration in the shared A buffer.
             self.force.update_force_device(self.pset)
         else:
-            # A CPU force must see current host state. This path preserves
-            # compatibility with arbitrary force implementations.
             self.__occ.sync_to_host("X", self.pset.X)
             self.__occ.sync_to_host("V", self.pset.V)
             self.force.update_force(self.pset)
@@ -116,22 +112,28 @@ class EulerSolverOCL(os.OdeSolver):
         self.__occ.mark_device_modified("X")
         self.__occ.mark_device_modified("V")
 
-        # Positions are required by the current OpenGL renderer each frame.
+        # The legacy renderer consumes host X every frame.
         self.__occ.sync_to_host("X", self.pset.X)
 
         boundary = self.pset.boundary
+        boundary_active = False
+        if boundary is not None:
+            needs_update = getattr(boundary, "needs_update", None)
+            if needs_update is None:
+                boundary_active = True
+            else:
+                boundary_active = bool(needs_update(self.pset))
+
         need_host_velocity = (
             self.__sync_velocity
-            or boundary is not None
             or self.pset.log_V_enabled
+            or boundary_active
         )
         if need_host_velocity:
             self.__occ.sync_to_host("V", self.pset.V)
 
-        if boundary is not None:
+        if boundary is not None and boundary_active:
             changed = boundary.boundary(self.pset)
-            # Old/custom boundaries may not return a flag. Be conservative in
-            # that case and assume they changed host X/V.
             changed = True if changed is None else bool(changed)
             if changed:
                 self.__occ.mark_host_modified("X")
