@@ -179,6 +179,7 @@ def fountain():
                     _bridge.close()
                     _animation.ode_solver = _fallback
                     gc.collect()
+                    print("OpenCL/OpenGL interop resources released before GL shutdown")
 
                 animation.add_cleanup_callback(cleanup_interop)
 
