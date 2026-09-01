@@ -133,7 +133,11 @@ def fountain():
                     occ.OCLC_X | occ.OCLC_V | occ.OCLC_A | occ.OCLC_M,
                     gl_sharing=True,
                 )
-                bridge = OpenCLGLPositionBuffer(shared_ctx, pset)
+                bridge = OpenCLGLPositionBuffer(
+                    shared_ctx,
+                    pset,
+                    animation.draw_particles,
+                )
 
                 shared_force = FusedConstDragOCL(
                     pset.size,
@@ -159,7 +163,6 @@ def fountain():
                 # Commit the new path only after all GL/CL resources and
                 # kernels have been created successfully.
                 animation.ode_solver = shared_solver
-                animation.draw_particles.set_shared_position_vbo(bridge.vbo)
                 pset.set_boundary(None)  # boundary/reset is fused on the GPU
                 animation.set_post_step_callback(
                     lambda _animation: bridge.update_from_device()
