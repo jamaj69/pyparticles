@@ -36,12 +36,25 @@ class EulerSolverOCL(os.OdeSolver):
     may disable it. Boundaries implementing ``needs_update`` then trigger a V
     download only on frames where a particle actually crosses the domain.
 
+    ``sync_positions`` defaults to True because the legacy renderer consumes
+    host ``pset.X`` every frame. Compute-only users, or a renderer backed by an
+    OpenCL/OpenGL shared buffer, may disable it so X never crosses PCIe during
+    the integration hot path. A host-side boundary still forces X current.
+
     Device forces may optionally expose ``euler_step_device(pset, dt)``. In
     that case force evaluation and Euler integration can be fused into one
     kernel launch while the synchronization/boundary policy remains here.
     """
 
-    def __init__(self, force, p_set, dt, ocl_context=None, sync_velocity=True):
+    def __init__(
+        self,
+        force,
+        p_set,
+        dt,
+        ocl_context=None,
+        sync_velocity=True,
+        sync_positions=True,
+    ):
         if cl is None:
             raise RuntimeError("PyOpenCL is required for EulerSolverOCL")
         if p_set.dim != 3:
@@ -59,6 +72,7 @@ class EulerSolverOCL(os.OdeSolver):
             self.__occ = ocl_context
 
         self.__sync_velocity = bool(sync_velocity)
+        self.__sync_positions = bool(sync_positions)
         self.__init_prog_cl()
 
     def __init_prog_cl(self):
@@ -129,10 +143,18 @@ class EulerSolverOCL(os.OdeSolver):
             self.__occ.mark_device_modified("X")
             self.__occ.mark_device_modified("V")
 
-        # The legacy renderer consumes host X every frame.
-        self.__occ.sync_to_host("X", self.pset.X)
-
         boundary = self.pset.boundary
+
+        # Host boundaries and trajectory logging need host X even when normal
+        # per-frame synchronization is disabled.
+        need_host_positions = (
+            self.__sync_positions
+            or self.pset.log_X_enabled
+            or boundary is not None
+        )
+        if need_host_positions:
+            self.__occ.sync_to_host("X", self.pset.X)
+
         boundary_active = False
         if boundary is not None:
             needs_update = getattr(boundary, "needs_update", None)
@@ -182,3 +204,11 @@ class EulerSolverOCL(os.OdeSolver):
         self.__sync_velocity = bool(value)
 
     sync_velocity = property(get_sync_velocity, set_sync_velocity)
+
+    def get_sync_positions(self):
+        return self.__sync_positions
+
+    def set_sync_positions(self, value):
+        self.__sync_positions = bool(value)
+
+    sync_positions = property(get_sync_positions, set_sync_positions)
