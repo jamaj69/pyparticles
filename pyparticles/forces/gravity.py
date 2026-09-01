@@ -53,7 +53,7 @@ class Gravity( fr.Force ) :
         self.__V = np.zeros( ( size , size ) )
         self.__D = np.zeros( ( size , size ) )
         self.__M = np.zeros( ( size , size ) )
-        if m != None :
+        if m is not None :
             self.set_masses( m )
         
         
@@ -123,10 +123,10 @@ class GravityOCL( fr.Force ) :
     """
     def __init__(self , size , dim=3 , m=None , Consts=1.0 , ocl_context=None ):
         
-        self.__dim = np.int( dim )
-        self.__size = np.int( size )
+        self.__dim = int( dim )
+        self.__size = int( size )
         
-        if ocl_context == None :
+        if ocl_context is None :
             self.__occ = occ.OpenCLcontext( size , dim , ( occ.OCLC_X | occ.OCLC_A | occ.OCLC_M )  )
         else :
             self.__occ = ocl_context   
@@ -138,7 +138,7 @@ class GravityOCL( fr.Force ) :
         self.__A = np.zeros( ( size , dim ) , dtype=self.__occ.dtype )
         self.__F = np.zeros( ( size , dim ) , dtype=self.__occ.dtype )
         
-        if m != None :
+        if m is not None :
             self.set_masses( m )
             
         self.__init_prog_cl()
