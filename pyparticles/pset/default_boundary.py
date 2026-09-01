@@ -17,6 +17,15 @@ class DefaultBoundary(bd.Boundary):
         self.set_boundary(bound, dim)
         self.__defualt_pos = defualt_pos
 
+    def needs_update(self, p_set):
+        """Return True when at least one position lies outside the domain."""
+        for i in range(self.dim):
+            if np.any(p_set.X[:, i] < self.bound[i, 0]):
+                return True
+            if np.any(p_set.X[:, i] > self.bound[i, 1]):
+                return True
+        return False
+
     def boundary(self, p_set):
         changed = False
         for i in range(self.dim):
