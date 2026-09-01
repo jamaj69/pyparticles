@@ -4,6 +4,7 @@ import numpy as np
 
 from pyparticles.forces.const_force import ConstForce, ConstForceOCL
 from pyparticles.forces.drag import Drag, DragOCL
+from pyparticles.forces.fused_const_drag import FusedConstDragOCL
 from pyparticles.forces.gravity import GravityOCL
 from pyparticles.forces.multiple_force import MultipleForce, MultipleForceOCL
 from pyparticles.ode.euler_solver import EulerSolver, EulerSolverOCL
@@ -76,6 +77,21 @@ class OpenCLRegressionTests(unittest.TestCase):
         np.testing.assert_allclose(p_gpu.X, p_cpu.X, rtol=2e-5, atol=2e-5)
         np.testing.assert_allclose(p_gpu.V, p_cpu.V, rtol=2e-5, atol=2e-5)
 
+    def _build_cpu_fountain(self, x0, v0, dt):
+        n = len(x0)
+        pset = ParticlesSet(n, dtype=np.float32)
+        pset.X[:] = x0
+        pset.V[:] = v0
+        pset.M[:] = 0.1
+
+        grav = ConstForce(n, dim=3, u_force=(0.0, 0.0, -10.0))
+        drag = Drag(n, dim=3, Consts=0.01)
+        force = MultipleForce(n, dim=3)
+        force.append_force(grav)
+        force.append_force(drag)
+        force.set_masses(pset.M)
+        return pset, EulerSolver(force, pset, dt)
+
     def test_fountain_force_pipeline_matches_cpu(self):
         n = 512
         steps = 50
@@ -83,19 +99,7 @@ class OpenCLRegressionTests(unittest.TestCase):
 
         x0 = self.rng.normal(0.0, 2.0, size=(n, 3)).astype(np.float32)
         v0 = self.rng.normal(0.0, 5.0, size=(n, 3)).astype(np.float32)
-
-        p_cpu = ParticlesSet(n, dtype=np.float32)
-        p_cpu.X[:] = x0
-        p_cpu.V[:] = v0
-        p_cpu.M[:] = 0.1
-
-        grav_cpu = ConstForce(n, dim=3, u_force=(0.0, 0.0, -10.0))
-        drag_cpu = Drag(n, dim=3, Consts=0.01)
-        force_cpu = MultipleForce(n, dim=3)
-        force_cpu.append_force(grav_cpu)
-        force_cpu.append_force(drag_cpu)
-        force_cpu.set_masses(p_cpu.M)
-        solver_cpu = EulerSolver(force_cpu, p_cpu, dt)
+        p_cpu, solver_cpu = self._build_cpu_fountain(x0, v0, dt)
 
         p_gpu = ParticlesSet(n, dtype=np.float32)
         p_gpu.X[:] = x0
@@ -127,6 +131,55 @@ class OpenCLRegressionTests(unittest.TestCase):
 
         np.testing.assert_allclose(p_gpu.X, p_cpu.X, rtol=1e-4, atol=1e-4)
         np.testing.assert_allclose(p_gpu.V, p_cpu.V, rtol=1e-4, atol=1e-4)
+
+    def test_fused_fountain_matches_cpu_and_stays_resident(self):
+        n = 512
+        steps = 50
+        dt = 0.005
+
+        x0 = self.rng.normal(0.0, 2.0, size=(n, 3)).astype(np.float32)
+        v0 = self.rng.normal(0.0, 5.0, size=(n, 3)).astype(np.float32)
+        p_cpu, solver_cpu = self._build_cpu_fountain(x0, v0, dt)
+
+        p_gpu = ParticlesSet(n, dtype=np.float32)
+        p_gpu.X[:] = x0
+        p_gpu.V[:] = v0
+        p_gpu.M[:] = 0.1
+        ctx = OpenCLcontext(n, 3, OCLC_X | OCLC_V | OCLC_A | OCLC_M)
+        force = FusedConstDragOCL(
+            n,
+            m=p_gpu.M,
+            u_force=(0.0, 0.0, -10.0),
+            drag_const=0.01,
+            ocl_context=ctx,
+        )
+        solver_gpu = EulerSolverOCL(
+            force,
+            p_gpu,
+            dt,
+            ocl_context=ctx,
+            sync_velocity=False,
+        )
+
+        ctx.set_from_host("X", p_gpu.X)
+        ctx.set_from_host("V", p_gpu.V)
+        ctx.reset_transfer_stats()
+
+        for _ in range(steps):
+            solver_cpu.step()
+            solver_gpu.step()
+
+        stats = ctx.transfer_stats
+        solver_gpu.sync_to_host(velocity=True)
+
+        np.testing.assert_allclose(p_gpu.X, p_cpu.X, rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(p_gpu.V, p_cpu.V, rtol=1e-4, atol=1e-4)
+        self.assertEqual(stats["h2d_calls"], 0)
+        self.assertEqual(stats["d2h_calls"], steps)
+        self.assertEqual(stats["by_buffer"]["X"]["d2h_calls"], steps)
+        self.assertEqual(stats["by_buffer"]["V"]["d2h_calls"], 0)
+        self.assertEqual(stats["by_buffer"]["A"]["h2d_calls"], 0)
+        self.assertEqual(stats["by_buffer"]["A"]["d2h_calls"], 0)
 
     def test_resident_fountain_pipeline_avoids_hot_path_uploads(self):
         n = 128
