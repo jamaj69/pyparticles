@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark CPU, resident OpenCL, and fused OpenCL fountain physics."""
+"""Benchmark CPU, resident OpenCL, fused OpenCL, and compute-only OpenCL."""
 
 import argparse
 from pathlib import Path
@@ -85,12 +85,13 @@ def build_gpu_generic(x0, v0, dt):
         dt,
         ocl_context=ctx,
         sync_velocity=False,
+        sync_positions=True,
     )
     preload(ctx, pset)
     return pset, solver, ctx
 
 
-def build_gpu_fused(x0, v0, dt):
+def build_gpu_fused(x0, v0, dt, sync_positions=True):
     n = len(x0)
     pset = make_pset(x0, v0)
     ctx = OpenCLcontext(n, 3, OCLC_X | OCLC_V | OCLC_A | OCLC_M)
@@ -108,6 +109,7 @@ def build_gpu_fused(x0, v0, dt):
         dt,
         ocl_context=ctx,
         sync_velocity=False,
+        sync_positions=sync_positions,
     )
     preload(ctx, pset)
     return pset, solver, ctx
@@ -159,36 +161,50 @@ def main():
     x0, v0 = build_initial_state(args.particles, args.seed)
     p_cpu, cpu = build_cpu(x0, v0, args.dt)
     p_generic, generic, generic_ctx = build_gpu_generic(x0, v0, args.dt)
-    p_fused, fused, fused_ctx = build_gpu_fused(x0, v0, args.dt)
+    p_fused, fused, fused_ctx = build_gpu_fused(x0, v0, args.dt, sync_positions=True)
+    p_compute, compute, compute_ctx = build_gpu_fused(
+        x0, v0, args.dt, sync_positions=False
+    )
 
     cpu_wall = run_steps(cpu, args.steps)
     generic_wall = run_steps(generic, args.steps)
     generic_stats = generic_ctx.transfer_stats
     fused_wall = run_steps(fused, args.steps)
     fused_stats = fused_ctx.transfer_stats
+    compute_wall = run_steps(compute, args.steps)
+    compute_stats = compute_ctx.transfer_stats
 
-    # Velocity intentionally remains resident during each timed region.
+    # Resident V, and compute-only X, are synchronized only after timing so the
+    # numerical comparison does not contaminate hot-path transfer statistics.
     generic.sync_to_host(velocity=True)
     fused.sync_to_host(velocity=True)
+    compute.sync_to_host(velocity=True)
 
     print("Particles   :", args.particles)
     print("Steps       :", args.steps)
     print("Sim time    :", args.steps * args.dt)
     print()
-    print("CPU wall    : %.6f s" % cpu_wall)
-    print("GPU generic : %.6f s" % generic_wall)
-    print("GPU fused   : %.6f s" % fused_wall)
-    print("CPU/generic : %.3fx" % (cpu_wall / generic_wall))
-    print("CPU/fused   : %.3fx" % (cpu_wall / fused_wall))
-    print("Generic/fused: %.3fx" % (generic_wall / fused_wall))
+    print("CPU wall       : %.6f s" % cpu_wall)
+    print("GPU generic    : %.6f s" % generic_wall)
+    print("GPU fused      : %.6f s" % fused_wall)
+    print("GPU compute-only: %.6f s" % compute_wall)
+    print("CPU/generic    : %.3fx" % (cpu_wall / generic_wall))
+    print("CPU/fused      : %.3fx" % (cpu_wall / fused_wall))
+    print("CPU/compute    : %.3fx" % (cpu_wall / compute_wall))
+    print("Generic/fused  : %.3fx" % (generic_wall / fused_wall))
+    print("Fused/compute  : %.3fx" % (fused_wall / compute_wall))
     print()
     print_accuracy("Generic accuracy vs CPU:", p_generic, p_cpu)
     print()
     print_accuracy("Fused accuracy vs CPU:", p_fused, p_cpu)
     print()
+    print_accuracy("Compute-only accuracy vs CPU:", p_compute, p_cpu)
+    print()
     print_transfers("Generic steady-state transfers:", generic_stats)
     print()
     print_transfers("Fused steady-state transfers:", fused_stats)
+    print()
+    print_transfers("Compute-only steady-state transfers:", compute_stats)
 
 
 if __name__ == "__main__":
