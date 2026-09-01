@@ -64,8 +64,6 @@ class OpenCLGLPositionBuffer(object):
         if self.__closed:
             raise RuntimeError("The shared OpenGL position buffer is closed")
 
-        # Without cl_khr_gl_event, the portable synchronization rule is to
-        # finish GL use before OpenCL acquires the shared object.
         glFinish()
         acquire = self.__occ.acquire_gl_objects([self.__gl_buffer])
         copy = cl.enqueue_copy(
@@ -78,7 +76,6 @@ class OpenCLGLPositionBuffer(object):
         release = self.__occ.release_gl_objects(
             [self.__gl_buffer], wait_for=[copy]
         )
-        # The following GL draw must not start before ownership returns to GL.
         release.wait()
 
         self.__copy_calls += 1
@@ -93,6 +90,12 @@ class OpenCLGLPositionBuffer(object):
                 self.__draw_particles.set_shared_position_vbo(None)
             except Exception:
                 pass
+        try:
+            if self.__gl_buffer is not None:
+                self.__gl_buffer.release()
+                self.__gl_buffer = None
+        except Exception:
+            pass
         try:
             glDeleteBuffers(1, [self.__vbo])
         except Exception:
