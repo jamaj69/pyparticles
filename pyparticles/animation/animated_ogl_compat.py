@@ -10,7 +10,8 @@
 
 The historical renderer is kept intact.  This module adapts the pieces whose
 runtime behaviour changed between the 2012 PyOpenGL/GLUT stack and current
-FreeGLUT/PyOpenGL/NumPy releases.
+FreeGLUT/PyOpenGL/NumPy releases.  It also provides lifecycle hooks needed to
+create OpenCL/OpenGL shared resources after the GL context exists.
 """
 
 import ctypes
@@ -22,19 +23,12 @@ import pyparticles.ogl.draw_particles_ogl_compat as draw_compat
 import pyparticles.ogl.draw_vector_field as legacy_vector_field
 
 
-# The legacy AnimatedGl constructor resolves DrawParticlesGL through the
-# ``drp`` module stored in animated_ogl.py.  Replace that constructor before
-# any AnimatedGl instance is created, while retaining the original renderer
-# module for the remainder of the OpenGL code.
 legacy_draw.DrawParticlesGL = draw_compat.DrawParticlesGL
 legacy_draw.charged_particles_color = draw_compat.charged_particles_color
 legacy_draw.charged_particles_vect_color = draw_compat.charged_particles_vect_color
 legacy.drp.DrawParticlesGL = draw_compat.DrawParticlesGL
 
 
-# OpenGL contexts are commonly destroyed before Python finalizes renderer
-# objects.  Avoid issuing glDeleteLists calls from object finalizers after the
-# context has disappeared.  The driver releases these objects with the context.
 def _safe_vector_field_del(self):
     pass
 
@@ -102,10 +96,14 @@ def _configure_freeglut_exit():
 
 
 class AnimatedGl(legacy.AnimatedGl):
-    """Legacy renderer with modern FreeGLUT lifecycle compatibility."""
+    """Legacy renderer with modern FreeGLUT and CL/GL lifecycle hooks."""
 
-    # The 2012 AnimatedGl getter contains a typo (get_rajectory_step).  Keep
-    # the public property working for all demos without editing the renderer.
+    def __init__(self):
+        super(AnimatedGl, self).__init__()
+        self.__gl_context_ready_callback = None
+        self.__post_step_callback = None
+        self.__cleanup_callbacks = []
+
     def get_trajectory_step(self):
         return legacy.pan.Animation.get_trajectory_step(self)
 
@@ -115,17 +113,54 @@ class AnimatedGl(legacy.AnimatedGl):
 
     trajectory_step = property(get_trajectory_step, set_trajectory_step)
 
-    def build_animation(self):
-        # animated_ogl.py uses ctypes.c_char_p() but the original Linux path
-        # never imported ctypes.
-        legacy.ctypes = ctypes
+    def set_gl_context_ready_callback(self, callback):
+        """Run *callback(animation)* immediately after GLUT creates the window.
 
-        # build_animation() assigns ``KeyPressed.animation`` to the callback
-        # found in the legacy module, so install our adapter before that step.
+        At that point the GL context is current, but the legacy builder has not
+        yet called ``ode_solver.update_force()``.  A callback may therefore
+        create a GL-sharing OpenCL context and replace ``animation.ode_solver``
+        before the first force evaluation.
+        """
+        self.__gl_context_ready_callback = callback
+
+    def set_post_step_callback(self, callback):
+        """Run *callback(animation)* after each solver step and before draw."""
+        self.__post_step_callback = callback
+
+    def add_cleanup_callback(self, callback):
+        self.__cleanup_callbacks.append(callback)
+
+    def build_animation(self):
+        legacy.ctypes = ctypes
         legacy.KeyPressed = _key_pressed
 
-        result = super(AnimatedGl, self).build_animation()
+        # The legacy builder creates the GLUT window and immediately evaluates
+        # the force.  Wrap just the window creation call so CL/GL resources can
+        # be established in the narrow interval where the GL context is current
+        # and before the solver is first used.
+        original_create_window = legacy.glutCreateWindow
+
+        def create_window_with_hook(*args, **kwargs):
+            window = original_create_window(*args, **kwargs)
+            callback = self.__gl_context_ready_callback
+            if callback is not None:
+                callback(self)
+            return window
+
+        legacy.glutCreateWindow = create_window_with_hook
+        try:
+            result = super(AnimatedGl, self).build_animation()
+        finally:
+            legacy.glutCreateWindow = original_create_window
+
         _configure_freeglut_exit()
+        return result
+
+    def data_stream(self):
+        result = super(AnimatedGl, self).data_stream()
+        callback = self.__post_step_callback
+        if callback is not None:
+            callback(self)
         return result
 
     def start(self):
@@ -136,4 +171,9 @@ class AnimatedGl(legacy.AnimatedGl):
         except KeyboardInterrupt:
             return None
         finally:
+            for callback in reversed(self.__cleanup_callbacks):
+                try:
+                    callback(self)
+                except Exception:
+                    pass
             signal.signal(signal.SIGINT, previous_sigint)
