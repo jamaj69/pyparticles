@@ -41,14 +41,33 @@ from OpenGL.GL import (
 )
 
 
-def _event_seconds(event):
-    """Return GPU execution time for a completed profiling-enabled CL event."""
+def _event_profile_seconds(event):
+    """Return queue and execution phases for a completed OpenCL event."""
+    result = {
+        "queued_to_submit_s": 0.0,
+        "submit_to_start_s": 0.0,
+        "queued_to_start_s": 0.0,
+        "execution_s": 0.0,
+        "queued_to_end_s": 0.0,
+    }
     if event is None:
-        return 0.0
+        return result
+
     try:
-        return max(0.0, (event.profile.end - event.profile.start) * 1.0e-9)
+        queued = int(event.profile.queued)
+        submit = int(event.profile.submit)
+        start = int(event.profile.start)
+        end = int(event.profile.end)
     except Exception:
-        return 0.0
+        return result
+
+    scale = 1.0e-9
+    result["queued_to_submit_s"] = max(0, submit - queued) * scale
+    result["submit_to_start_s"] = max(0, start - submit) * scale
+    result["queued_to_start_s"] = max(0, start - queued) * scale
+    result["execution_s"] = max(0, end - start) * scale
+    result["queued_to_end_s"] = max(0, end - queued) * scale
+    return result
 
 
 class OpenCLGLPositionBuffer(object):
@@ -78,13 +97,19 @@ class OpenCLGLPositionBuffer(object):
         self.__needs_gl_completion = [False] * self._BUFFER_COUNT
         self.__vbo_to_index = {}
         self.__last_profile = {
-            "gl_finish_wall_s": 0.0,  # backward-compatible key; always zero normally
+            "gl_finish_wall_s": 0.0,
             "gl_fence_wait_wall_s": 0.0,
             "gl_finish_fallback_wall_s": 0.0,
             "fence_immediate": 1.0,
             "acquire_gpu_s": 0.0,
+            "acquire_queue_s": 0.0,
+            "acquire_total_s": 0.0,
             "copy_gpu_s": 0.0,
+            "copy_queue_s": 0.0,
+            "copy_total_s": 0.0,
             "release_gpu_s": 0.0,
+            "release_queue_s": 0.0,
+            "release_total_s": 0.0,
             "release_wait_wall_s": 0.0,
             "bridge_wall_s": 0.0,
             "vbo_index": 0.0,
@@ -138,9 +163,6 @@ class OpenCLGLPositionBuffer(object):
                 pass
             self.__fences[index] = None
 
-        # If fence creation itself is unavailable/fails, remember that this VBO
-        # still has outstanding GL work.  Reuse will then conservatively fall
-        # back to glFinish(), preserving correctness.
         self.__needs_gl_completion[index] = True
         try:
             fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
@@ -175,17 +197,9 @@ class OpenCLGLPositionBuffer(object):
                         self._FENCE_TIMEOUT_NS,
                     )
                     if result not in (GL_ALREADY_SIGNALED, GL_CONDITION_SATISFIED):
-                        # TIMEOUT_EXPIRED or WAIT_FAILED means that the precise
-                        # fence path did not prove completion.  Fall back to the
-                        # old global synchronization for this reuse only.
-                        if result in (GL_TIMEOUT_EXPIRED, GL_WAIT_FAILED):
-                            fallback_start = time.perf_counter()
-                            glFinish()
-                            fallback_seconds = time.perf_counter() - fallback_start
-                        else:
-                            fallback_start = time.perf_counter()
-                            glFinish()
-                            fallback_seconds = time.perf_counter() - fallback_start
+                        fallback_start = time.perf_counter()
+                        glFinish()
+                        fallback_seconds = time.perf_counter() - fallback_start
         except Exception:
             fallback_start = time.perf_counter()
             glFinish()
@@ -226,11 +240,16 @@ class OpenCLGLPositionBuffer(object):
         )
 
         # Without cl_khr_gl_event, OpenGL must not consume the VBO until the CL
-        # release is complete.  Keep this narrow wait; unlike the old glFinish,
-        # measured runs show it is effectively free on the NVIDIA path.
+        # release is complete.  Keep this wait so rendering remains correct;
+        # profiling below now exposes whether the delay is queue latency or
+        # actual ownership/copy execution.
         wait_start = time.perf_counter()
         release.wait()
         wait_end = time.perf_counter()
+
+        acquire_profile = _event_profile_seconds(acquire)
+        copy_profile = _event_profile_seconds(copy)
+        release_profile = _event_profile_seconds(release)
 
         self.__active_index = index
         if self.__draw_particles is not None:
@@ -242,9 +261,15 @@ class OpenCLGLPositionBuffer(object):
             "gl_fence_wait_wall_s": fence_wait,
             "gl_finish_fallback_wall_s": finish_fallback,
             "fence_immediate": fence_immediate,
-            "acquire_gpu_s": _event_seconds(acquire),
-            "copy_gpu_s": _event_seconds(copy),
-            "release_gpu_s": _event_seconds(release),
+            "acquire_gpu_s": acquire_profile["execution_s"],
+            "acquire_queue_s": acquire_profile["queued_to_start_s"],
+            "acquire_total_s": acquire_profile["queued_to_end_s"],
+            "copy_gpu_s": copy_profile["execution_s"],
+            "copy_queue_s": copy_profile["queued_to_start_s"],
+            "copy_total_s": copy_profile["queued_to_end_s"],
+            "release_gpu_s": release_profile["execution_s"],
+            "release_queue_s": release_profile["queued_to_start_s"],
+            "release_total_s": release_profile["queued_to_end_s"],
             "release_wait_wall_s": wait_end - wait_start,
             "bridge_wall_s": bridge_end - bridge_start,
             "vbo_index": float(index),
@@ -278,6 +303,7 @@ class OpenCLGLPositionBuffer(object):
         if self.__draw_particles is not None:
             try:
                 self.__draw_particles.set_shared_position_draw_complete_callback(None)
+                self.__draw_particles.set_gpu_timing_enabled(False)
                 self.__draw_particles.set_shared_position_vbo(None)
             except Exception:
                 pass
@@ -308,8 +334,6 @@ class OpenCLGLPositionBuffer(object):
         self.__vbos = []
         self.__vbo_to_index = {}
 
-        # Crucial for NVIDIA/GLX teardown: do not keep the GL-sharing OpenCL
-        # context alive solely through the bridge after its GL objects are gone.
         self.__occ = None
         self.__pset = None
         self.__draw_particles = None
