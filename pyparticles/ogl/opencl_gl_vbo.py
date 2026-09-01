@@ -83,24 +83,44 @@ class OpenCLGLPositionBuffer(object):
         return release
 
     def close(self):
+        """Release CL and GL views while the owning GL context is still current."""
         if self.__closed:
             return
+        self.__closed = True
+
+        # Stop any pending CL work touching the shared object, then make sure
+        # the last OpenGL draw has also completed before deleting the VBO.
+        try:
+            self.__occ.CL_queue.finish()
+        except Exception:
+            pass
+        try:
+            glFinish()
+        except Exception:
+            pass
+
         if self.__draw_particles is not None:
             try:
                 self.__draw_particles.set_shared_position_vbo(None)
             except Exception:
                 pass
+
         try:
             if self.__gl_buffer is not None:
-                self.__gl_buffer.release()
+                release = getattr(self.__gl_buffer, "release", None)
+                if release is not None:
+                    release()
                 self.__gl_buffer = None
         except Exception:
-            pass
+            self.__gl_buffer = None
+
         try:
-            glDeleteBuffers(1, [self.__vbo])
+            if self.__vbo:
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glDeleteBuffers(1, [self.__vbo])
+                self.__vbo = 0
         except Exception:
-            pass
-        self.__closed = True
+            self.__vbo = 0
 
     def get_vbo(self):
         return self.__vbo
