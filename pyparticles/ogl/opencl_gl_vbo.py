@@ -5,11 +5,11 @@
 
 """Share particle positions with OpenGL through double-buffered VBOs.
 
-The simulation keeps its canonical X array in an ordinary OpenCL buffer.  At
-render time this helper copies X into one of two OpenGL VBOs exposed through
-``cl_khr_gl_sharing``.  Each VBO receives a GL fence after drawing; OpenCL only
-waits for the particular VBO it is about to reuse instead of globally stalling
-all OpenGL work with ``glFinish()`` every frame.
+The stable path keeps canonical X in an ordinary OpenCL buffer and copies it to
+an alternating shared VBO after each simulation step.  An experimental fused
+path acquires the next VBO before the step so the fountain integration kernel
+can mirror its final X values directly into that VBO.  Both paths retain
+per-buffer OpenGL fences and never require host position transfers.
 """
 
 import time
@@ -28,8 +28,6 @@ from OpenGL.GL import (
     GL_DYNAMIC_DRAW,
     GL_SYNC_FLUSH_COMMANDS_BIT,
     GL_SYNC_GPU_COMMANDS_COMPLETE,
-    GL_TIMEOUT_EXPIRED,
-    GL_WAIT_FAILED,
     glBindBuffer,
     glBufferData,
     glClientWaitSync,
@@ -99,6 +97,8 @@ class OpenCLGLPositionBuffer(object):
         self.__nbytes = int(pset.size * pset.dim * np.dtype(np.float32).itemsize)
         self.__copy_calls = 0
         self.__copy_bytes = 0
+        self.__mirror_calls = 0
+        self.__mirror_bytes = 0
         self.__closed = False
         self.__next_index = 0
         self.__active_index = 0
@@ -107,29 +107,13 @@ class OpenCLGLPositionBuffer(object):
         self.__fences = [None] * self._BUFFER_COUNT
         self.__needs_gl_completion = [False] * self._BUFFER_COUNT
         self.__vbo_to_index = {}
-        self.__last_profile = {
-            "gl_finish_wall_s": 0.0,
-            "gl_fence_wait_wall_s": 0.0,
-            "gl_finish_fallback_wall_s": 0.0,
-            "fence_immediate": 1.0,
-            "acquire_gpu_s": 0.0,
-            "acquire_queue_s": float("nan"),
-            "acquire_total_s": float("nan"),
-            "copy_gpu_s": 0.0,
-            "copy_queue_s": float("nan"),
-            "copy_total_s": float("nan"),
-            "release_gpu_s": 0.0,
-            "release_queue_s": float("nan"),
-            "release_total_s": float("nan"),
-            "release_wait_wall_s": 0.0,
-            "bridge_wall_s": 0.0,
-            "vbo_index": 0.0,
-        }
+        self.__fused_pending = None
+        self.__last_profile = self._empty_profile()
 
         vertices = np.ascontiguousarray(pset.X, dtype=np.float32)
         try:
             for index in range(self._BUFFER_COUNT):
-                vbo = int(glGenBuffers(1))
+                vbo = int(np.asarray(glGenBuffers(1)).reshape(-1)[0])
                 self.__vbos.append(vbo)
                 self.__vbo_to_index[vbo] = index
                 glBindBuffer(GL_ARRAY_BUFFER, vbo)
@@ -156,6 +140,28 @@ class OpenCLGLPositionBuffer(object):
             draw_particles.set_shared_position_draw_complete_callback(
                 self.mark_draw_complete
             )
+
+    @staticmethod
+    def _empty_profile():
+        return {
+            "gl_finish_wall_s": 0.0,
+            "gl_fence_wait_wall_s": 0.0,
+            "gl_finish_fallback_wall_s": 0.0,
+            "fence_immediate": 1.0,
+            "acquire_gpu_s": 0.0,
+            "acquire_queue_s": float("nan"),
+            "acquire_total_s": float("nan"),
+            "copy_gpu_s": 0.0,
+            "copy_queue_s": float("nan"),
+            "copy_total_s": float("nan"),
+            "release_gpu_s": 0.0,
+            "release_queue_s": float("nan"),
+            "release_total_s": float("nan"),
+            "release_wait_wall_s": 0.0,
+            "bridge_wall_s": 0.0,
+            "vbo_index": 0.0,
+            "fused_mirror": 0.0,
+        }
 
     def mark_draw_complete(self, vbo):
         """Insert a fence immediately after OpenGL submits a draw using *vbo*."""
@@ -226,16 +232,21 @@ class OpenCLGLPositionBuffer(object):
 
         return time.perf_counter() - start, immediate, fallback_seconds
 
-    def update_from_device(self):
-        """Copy current device X into the next free VBO and select it for draw."""
-        if self.__closed:
-            raise RuntimeError("The shared OpenGL position buffer is closed")
-
-        bridge_start = time.perf_counter()
+    def _select_next_vbo(self):
         index = self.__next_index
         self.__next_index = (self.__next_index + 1) % self._BUFFER_COUNT
-
         fence_wait, fence_immediate, finish_fallback = self._wait_for_gl_vbo(index)
+        return index, fence_wait, fence_immediate, finish_fallback
+
+    def update_from_device(self):
+        """Stable path: copy current device X into the next VBO and draw it."""
+        if self.__closed:
+            raise RuntimeError("The shared OpenGL position buffer is closed")
+        if self.__fused_pending is not None:
+            raise RuntimeError("A fused CL/GL render target is already acquired")
+
+        bridge_start = time.perf_counter()
+        index, fence_wait, fence_immediate, finish_fallback = self._select_next_vbo()
 
         gl_buffer = self.__gl_buffers[index]
         acquire = self.__occ.acquire_gl_objects([gl_buffer])
@@ -251,9 +262,7 @@ class OpenCLGLPositionBuffer(object):
         )
 
         # Without cl_khr_gl_event, OpenGL must not consume the VBO until the CL
-        # release is complete.  Keep this wait so rendering remains correct;
-        # profiling below exposes whether the delay is queue latency or actual
-        # ownership/copy execution.
+        # release is complete.  Keep this wait so rendering remains correct.
         wait_start = time.perf_counter()
         release.wait()
         wait_end = time.perf_counter()
@@ -284,11 +293,104 @@ class OpenCLGLPositionBuffer(object):
             "release_wait_wall_s": wait_end - wait_start,
             "bridge_wall_s": bridge_end - bridge_start,
             "vbo_index": float(index),
+            "fused_mirror": 0.0,
         }
 
         self.__copy_calls += 1
         self.__copy_bytes += self.__nbytes
         return release
+
+    def prepare_fused_render(self):
+        """Acquire the next VBO so a simulation kernel may write it directly.
+
+        Returns ``(cl_buffer, acquire_event)``.  The caller must arrange for its
+        kernel to wait for the acquire event and then call
+        :meth:`finish_fused_render` with the kernel event.
+        """
+        if self.__closed:
+            raise RuntimeError("The shared OpenGL position buffer is closed")
+        if self.__fused_pending is not None:
+            raise RuntimeError("A fused CL/GL render target is already acquired")
+
+        prepare_start = time.perf_counter()
+        index, fence_wait, fence_immediate, finish_fallback = self._select_next_vbo()
+        gl_buffer = self.__gl_buffers[index]
+        acquire = self.__occ.acquire_gl_objects([gl_buffer])
+        prepare_end = time.perf_counter()
+
+        self.__fused_pending = {
+            "index": index,
+            "gl_buffer": gl_buffer,
+            "acquire": acquire,
+            "fence_wait": fence_wait,
+            "fence_immediate": fence_immediate,
+            "finish_fallback": finish_fallback,
+            "prepare_wall_s": prepare_end - prepare_start,
+        }
+        return gl_buffer, acquire
+
+    def finish_fused_render(self, kernel_event):
+        """Release a VBO written by the fused simulation kernel and draw it."""
+        if self.__closed:
+            raise RuntimeError("The shared OpenGL position buffer is closed")
+        pending = self.__fused_pending
+        if pending is None:
+            raise RuntimeError("No fused CL/GL render target is pending")
+        if kernel_event is None:
+            raise ValueError("kernel_event is required for fused CL/GL rendering")
+
+        finish_start = time.perf_counter()
+        release = self.__occ.release_gl_objects(
+            [pending["gl_buffer"]], wait_for=[kernel_event]
+        )
+        wait_start = time.perf_counter()
+        release.wait()
+        wait_end = time.perf_counter()
+
+        acquire_profile = _event_profile_seconds(pending["acquire"])
+        release_profile = _event_profile_seconds(release)
+
+        index = pending["index"]
+        self.__active_index = index
+        if self.__draw_particles is not None:
+            self.__draw_particles.set_shared_position_vbo(self.__vbos[index])
+
+        finish_end = time.perf_counter()
+        self.__last_profile = {
+            "gl_finish_wall_s": 0.0,
+            "gl_fence_wait_wall_s": pending["fence_wait"],
+            "gl_finish_fallback_wall_s": pending["finish_fallback"],
+            "fence_immediate": pending["fence_immediate"],
+            "acquire_gpu_s": acquire_profile["execution_s"],
+            "acquire_queue_s": acquire_profile["queued_to_start_s"],
+            "acquire_total_s": acquire_profile["queued_to_end_s"],
+            "copy_gpu_s": 0.0,
+            "copy_queue_s": 0.0,
+            "copy_total_s": 0.0,
+            "release_gpu_s": release_profile["execution_s"],
+            "release_queue_s": release_profile["queued_to_start_s"],
+            "release_total_s": release_profile["queued_to_end_s"],
+            "release_wait_wall_s": wait_end - wait_start,
+            "bridge_wall_s": pending["prepare_wall_s"] + (finish_end - finish_start),
+            "vbo_index": float(index),
+            "fused_mirror": 1.0,
+        }
+        self.__fused_pending = None
+        self.__mirror_calls += 1
+        self.__mirror_bytes += self.__nbytes
+        return release
+
+    def _release_pending_fused_vbo(self):
+        pending = self.__fused_pending
+        if pending is None or self.__occ is None:
+            self.__fused_pending = None
+            return
+        try:
+            release = self.__occ.release_gl_objects([pending["gl_buffer"]])
+            release.wait()
+        except Exception:
+            pass
+        self.__fused_pending = None
 
     def close(self):
         """Release CL and GL views while the owning GL context is still current."""
@@ -306,6 +408,9 @@ class OpenCLGLPositionBuffer(object):
                 occ.CL_queue.finish()
         except Exception:
             pass
+
+        self._release_pending_fused_vbo()
+
         try:
             glFinish()
         except Exception:
@@ -367,6 +472,8 @@ class OpenCLGLPositionBuffer(object):
         return {
             "calls": self.__copy_calls,
             "bytes": self.__copy_bytes,
+            "mirror_calls": self.__mirror_calls,
+            "mirror_bytes": self.__mirror_bytes,
         }
 
     copy_stats = property(get_copy_stats)
