@@ -22,18 +22,27 @@ from OpenGL.GL import (
     GL_FLOAT,
     GL_LINES,
     GL_POINTS,
+    GL_QUERY_RESULT,
+    GL_QUERY_RESULT_AVAILABLE,
+    GL_TIME_ELAPSED,
     GL_UNSIGNED_INT,
     GL_VERTEX_ARRAY,
     glBegin,
+    glBeginQuery,
     glBindBuffer,
     glCallList,
     glColor4f,
     glColorPointer,
+    glDeleteQueries,
     glDisableClientState,
     glDrawArrays,
     glDrawElements,
     glEnableClientState,
     glEnd,
+    glEndQuery,
+    glGenQueries,
+    glGetQueryObjectiv,
+    glGetQueryObjectui64v,
     glPointSize,
     glPopMatrix,
     glPushMatrix,
@@ -72,16 +81,27 @@ def charged_particles_vect_color(RGBA, pset):
 class DrawParticlesGL(legacy.DrawParticlesGL):
     """Legacy particle renderer with modern scalar and buffer handling."""
 
+    _GPU_QUERY_LIMIT = 64
+
     def __init__(self, *args, **kwargs):
         super(DrawParticlesGL, self).__init__(*args, **kwargs)
         self.__shared_position_vbo = None
         self.__shared_position_draw_complete_callback = None
         self.__last_draw_submit_seconds = 0.0
 
+        # GL timer queries are opt-in and are polled asynchronously.  Never ask
+        # for GL_QUERY_RESULT until GL_QUERY_RESULT_AVAILABLE says the result is
+        # ready, otherwise the profiler itself would insert a GPU/CPU stall.
+        self.__gpu_timing_enabled = False
+        self.__gpu_timing_available = True
+        self.__gpu_queries_pending = []
+        self.__gpu_draw_seconds_ready = []
+        self.__gpu_query_skipped = 0
+
     def __del__(self):
         # OpenGL contexts are frequently already gone during interpreter
-        # teardown.  The driver releases display-list resources with context
-        # destruction, so avoid unsafe GL calls from __del__.
+        # teardown.  The driver releases display-list/query resources with
+        # context destruction, so avoid unsafe GL calls from __del__.
         pass
 
     def _get_color_fun(self):
@@ -134,6 +154,120 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
         return self.__last_draw_submit_seconds
 
     last_draw_submit_seconds = property(get_last_draw_submit_seconds)
+
+    def set_gpu_timing_enabled(self, enabled):
+        """Enable non-blocking GL_TIME_ELAPSED measurements for glDrawArrays."""
+        enabled = bool(enabled)
+        if enabled:
+            self.__gpu_timing_enabled = True
+            return
+
+        self.__gpu_timing_enabled = False
+        self.cleanup_gpu_timing()
+
+    def get_gpu_timing_enabled(self):
+        return self.__gpu_timing_enabled
+
+    gpu_timing_enabled = property(
+        get_gpu_timing_enabled, set_gpu_timing_enabled
+    )
+
+    def _poll_gpu_timing(self):
+        """Collect completed timer queries without waiting for the GPU."""
+        if not self.__gpu_queries_pending:
+            return
+
+        while self.__gpu_queries_pending:
+            query = self.__gpu_queries_pending[0]
+            try:
+                available = bool(
+                    glGetQueryObjectiv(query, GL_QUERY_RESULT_AVAILABLE)
+                )
+            except Exception:
+                self.__gpu_timing_available = False
+                return
+
+            if not available:
+                break
+
+            self.__gpu_queries_pending.pop(0)
+            try:
+                elapsed_ns = int(
+                    glGetQueryObjectui64v(query, GL_QUERY_RESULT)
+                )
+                self.__gpu_draw_seconds_ready.append(elapsed_ns * 1.0e-9)
+            except Exception:
+                self.__gpu_timing_available = False
+            finally:
+                try:
+                    glDeleteQueries(1, [query])
+                except Exception:
+                    pass
+
+    def poll_gpu_timing(self):
+        self._poll_gpu_timing()
+
+    def drain_gpu_draw_times(self):
+        """Return completed draw timings accumulated since the previous drain."""
+        self._poll_gpu_timing()
+        values = list(self.__gpu_draw_seconds_ready)
+        self.__gpu_draw_seconds_ready[:] = []
+        return values
+
+    def get_gpu_timing_stats(self):
+        return {
+            "available": bool(self.__gpu_timing_available),
+            "pending": len(self.__gpu_queries_pending),
+            "ready": len(self.__gpu_draw_seconds_ready),
+            "skipped": int(self.__gpu_query_skipped),
+        }
+
+    gpu_timing_stats = property(get_gpu_timing_stats)
+
+    def cleanup_gpu_timing(self):
+        """Delete pending query objects while the GL context is still current."""
+        for query in self.__gpu_queries_pending:
+            try:
+                glDeleteQueries(1, [query])
+            except Exception:
+                pass
+        self.__gpu_queries_pending[:] = []
+        self.__gpu_draw_seconds_ready[:] = []
+
+    def _draw_arrays_profiled(self):
+        """Submit the point draw, optionally wrapped in an asynchronous timer."""
+        self._poll_gpu_timing()
+        query = None
+
+        if (
+            self.__gpu_timing_enabled
+            and self.__gpu_timing_available
+            and len(self.__gpu_queries_pending) < self._GPU_QUERY_LIMIT
+        ):
+            try:
+                query = int(glGenQueries(1))
+                glBeginQuery(GL_TIME_ELAPSED, query)
+            except Exception:
+                self.__gpu_timing_available = False
+                query = None
+        elif self.__gpu_timing_enabled:
+            self.__gpu_query_skipped += 1
+
+        draw_start = time.perf_counter()
+        try:
+            glDrawArrays(GL_POINTS, 0, self.pset.size)
+        finally:
+            self.__last_draw_submit_seconds = time.perf_counter() - draw_start
+            if query is not None:
+                try:
+                    glEndQuery(GL_TIME_ELAPSED)
+                    self.__gpu_queries_pending.append(query)
+                except Exception:
+                    self.__gpu_timing_available = False
+                    try:
+                        glDeleteQueries(1, [query])
+                    except Exception:
+                        pass
 
     def draw_particle(self, pset, i):
         mass = _scalar(pset.M[i])
@@ -200,9 +334,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
             )
             glBindBuffer(GL_ARRAY_BUFFER, 0)
             glVertexPointer(3, GL_FLOAT, 0, vertices)
-            draw_start = time.perf_counter()
-            glDrawArrays(GL_POINTS, 0, self.pset.size)
-            self.__last_draw_submit_seconds = time.perf_counter() - draw_start
+            self._draw_arrays_profiled()
         else:
             # Positions are already in GPU memory.  Apply the unit conversion
             # as a model-view scale instead of materializing a host array.
@@ -212,9 +344,7 @@ class DrawParticlesGL(legacy.DrawParticlesGL):
             glPushMatrix()
             unit_scale = 1.0 / float(self.pset.unit)
             glScalef(unit_scale, unit_scale, unit_scale)
-            draw_start = time.perf_counter()
-            glDrawArrays(GL_POINTS, 0, self.pset.size)
-            self.__last_draw_submit_seconds = time.perf_counter() - draw_start
+            self._draw_arrays_profiled()
 
             # The fence belongs immediately after the command that consumes
             # this VBO.  The CL/GL bridge uses it before reacquiring this same
