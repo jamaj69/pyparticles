@@ -37,12 +37,18 @@ def py_particle_version( r='s' ):
 
 
 def test_pyopencl():
-    try :
-        import pyopencl
-    except :
+    """Return True only when PyOpenCL has at least one usable device."""
+    try:
+        import pyopencl as cl
+    except ImportError:
         return False
-    else :
-        return True
+
+    try:
+        return any(platform.get_devices() for platform in cl.get_platforms())
+    except Exception:
+        # Broken/missing ICDs may allow importing pyopencl while still
+        # making every OpenCL operation unusable.
+        return False
     
 def about():
     
