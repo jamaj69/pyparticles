@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "PyParticles3"
+version = "0.4.0rc1"
+description = "Modern educational particle simulation toolbox with OpenCL/OpenGL acceleration"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE-gpl-3.0.txt"]
+authors = [
+  { name = "Simone Riva" },
+]
+maintainers = [
+  { name = "jamaj69" },
+]
+keywords = [
+  "particles",
+  "simulation",
+  "physics",
+  "opencl",
+  "opengl",
+  "gpu",
+  "scientific-computing",
+  "education",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Education",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+  "numpy>=2.0",
+  "scipy>=1.14",
+  "PyOpenGL>=3.1.7",
+  "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+opencl = [
+  "pyopencl>=2026.1",
+]
+dev = [
+  "build>=1.2",
+  "twine>=5",
+]
+docs = [
+  "mkdocs>=1.6",
+  "mkdocs-material>=9.5",
+  "pymdown-extensions>=10",
+]
+
+[project.urls]
+Homepage = "https://github.com/jamaj69/pyparticles"
+Source = "https://github.com/jamaj69/pyparticles"
+Documentation = "https://github.com/jamaj69/pyparticles#readme"
+Issues = "https://github.com/jamaj69/pyparticles/issues"
+"Original Project" = "https://github.com/simon-r/PyParticles"
+
+[project.scripts]
+pyparticles3 = "pyparticles.main.main:main"
+pyparticles_app = "pyparticles.main.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["pyparticles*"]
+exclude = ["tests*", "benchmarks*"]

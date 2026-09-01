@@ -14,26 +14,27 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-
+"""Project-wide version and optional dependency probes."""
 
 import zlib
 
-###########################
-# Current version
-v_major    = 0
-v_minor    = 3
-v_revision = 5
-###########################
 
-def py_particle_version( r='s' ):
-    global v_major
-    global v_minor
-    global v_revision
-    
-    if r == 's' :
-        return "%d.%d.%d" % ( v_major , v_minor , v_revision )
-    else :
-        return ( v_major , v_minor , v_revision )
+v_major = 0
+v_minor = 4
+v_revision = 0
+v_prerelease = "rc1"
+
+
+def py_particle_version(r="s"):
+    """Return the PyParticles3 compatibility version.
+
+    The string form follows the PyPI distribution version.  The historical
+    tuple form remains a three-integer tuple for compatibility with callers
+    that expect ``(major, minor, revision)``.
+    """
+    if r == "s":
+        return "%d.%d.%d%s" % (v_major, v_minor, v_revision, v_prerelease)
+    return (v_major, v_minor, v_revision)
 
 
 def test_pyopencl():
@@ -46,25 +47,29 @@ def test_pyopencl():
     try:
         return any(platform.get_devices() for platform in cl.get_platforms())
     except Exception:
-        # Broken/missing ICDs may allow importing pyopencl while still
-        # making every OpenCL operation unusable.
+        # Broken/missing ICDs may allow importing pyopencl while still making
+        # every OpenCL operation unusable.
         return False
-    
+
+
 def about():
-    
-    mail = zlib.decompress(b'x\x9c+\xce\xcc\xcd\xcfK\xd5+*KtH\xcfM\xcc\xcc\xd1K\xce\xcf\x05\x00R\x9c\x07\xba').decode('utf-8')
-    
+    mail = zlib.decompress(
+        b"x\x9c+\xce\xcc\xcd\xcfK\xd5+*KtH\xcfM\xcc\xcc\xd1K\xce\xcf\x05\x00R\x9c\x07\xba"
+    ).decode("utf-8")
+
     message = """
-    
-    PyParticles is a particle simulation toolbox entirely written in python.
 
-    The main objective of PyParticles is to provide a system API simple and fast to use. 
-    Furthermore is to provide a basic application for the implementation of simple models.
+    PyParticles3 is an independent modernization of the original PyParticles
+    particle simulation toolbox created by Simone Riva.
 
-    Visit: http://pyparticles.wordpress.com/ 
-    Docs: http://simon-r.github.com/PyParticles/index.html 
-    
-    Copyright (C) %s  %s email: %s 
+    The project preserves the original educational architecture while adding
+    modern Python compatibility, tests, OpenCL acceleration, OpenCL/OpenGL
+    interoperability, GPU profiling, and updated documentation.
+
+    Modern source: https://github.com/jamaj69/pyparticles
+    Original source: https://github.com/simon-r/PyParticles
+
+    Original copyright (C) 2012 Simone Riva, email: %s
 
     --------------------------------------------------------------------
 
@@ -72,19 +77,11 @@ def about():
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    
+
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
     GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>
     """
-    
-    message = message % ( '2012' , 'Simone Riva' , mail )
-    
-    print( message )
-    
 
-    
+    print(message % mail)
