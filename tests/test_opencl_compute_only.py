@@ -108,6 +108,54 @@ class OpenCLComputeOnlyTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(pset.X)))
         self.assertTrue(np.all(np.isfinite(pset.V)))
 
+    def test_fused_fountain_render_target_matches_canonical_positions(self):
+        rng = np.random.default_rng(9876)
+        n = 128
+        dt = 0.005
+        bounds = (-100.0, 100.0, -100.0, 100.0, 0.0, 100.0)
+
+        pset = ParticlesSet(n, dtype=np.float32)
+        pset.M[:] = 0.1
+        pset.X[:] = rng.uniform(-1.0, 1.0, size=(n, 3)).astype(np.float32)
+        pset.X[:, 2] += 2.0
+        pset.V[:] = rng.normal(0.0, 2.0, size=(n, 3)).astype(np.float32)
+
+        ctx = OpenCLcontext(n, 3, OCLC_X | OCLC_V | OCLC_A | OCLC_M)
+        ctx.add_array_by_name("render_X", size=n, dim=3, dtype=np.float32)
+        render_x = ctx.get_by_name("render_X")
+
+        force = FusedConstDragOCL(
+            n,
+            m=pset.M,
+            u_force=(0.0, 0.0, -10.0),
+            drag_const=0.01,
+            ocl_context=ctx,
+            fountain_bounds=bounds,
+        )
+        solver = EulerSolverOCL(
+            force,
+            pset,
+            dt,
+            ocl_context=ctx,
+            sync_velocity=False,
+            sync_positions=False,
+        )
+
+        ctx.set_from_host("X", pset.X)
+        ctx.set_from_host("V", pset.V)
+        force.set_render_target(render_x.data)
+        solver.step()
+
+        canonical = ctx.X_cla.get(queue=ctx.CL_queue)
+        mirrored = render_x.get(queue=ctx.CL_queue)
+        np.testing.assert_array_equal(mirrored, canonical)
+
+        # The render target is intentionally one-shot: a normal next step must
+        # not overwrite it unless the caller explicitly arms another target.
+        frozen = mirrored.copy()
+        solver.step()
+        np.testing.assert_array_equal(render_x.get(queue=ctx.CL_queue), frozen)
+
 
 if __name__ == "__main__":
     unittest.main()
