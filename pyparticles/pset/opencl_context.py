@@ -20,8 +20,12 @@ import numpy as np
 try:
     import pyopencl as cl
     import pyopencl.array as cla
-except:
-    ___foo = 0
+except ImportError as exc:
+    cl = None
+    cla = None
+    _PYOPENCL_IMPORT_ERROR = exc
+else:
+    _PYOPENCL_IMPORT_ERROR = None
     
 
 OCLC_X = np.uint8( 0b10000000 )
@@ -61,38 +65,47 @@ class OpenCLcontext( object ):
             solver = els.EulerSolverOCL( grav , pset , dt , ocl_context=occx )
     """
     def __init__( self , size , dim , mask=( OCLC_X | OCLC_V | OCLC_A | OCLC_M ) , dtype=np.float32 ):
-        
-        self.__dtype = dtype 
-        
-        self.__size = size
-        self.__dim = dim  
-        
+        if cl is None:
+            raise RuntimeError("PyOpenCL is not available") from _PYOPENCL_IMPORT_ERROR
+
+        np_dtype = np.dtype(dtype)
+        if np_dtype != np.dtype(np.float32):
+            raise TypeError("PyParticles OpenCL kernels currently support only float32")
+
+        self.__dtype = np_dtype.type
+        self.__size = int(size)
+        self.__dim = int(dim)
         self.__opt_arrays = dict()
-                
-        self.__cl_context = cl.create_some_context()
-        self.__cl_queue = cl.CommandQueue(self.__cl_context, properties=cl.command_queue_properties.PROFILING_ENABLE )
-        
+
+        try:
+            # Non-interactive selection still honours PYOPENCL_CTX when set and
+            # avoids blocking applications on stdin when only one choice exists.
+            self.__cl_context = cl.create_some_context(interactive=False)
+        except Exception as exc:
+            raise RuntimeError("No usable OpenCL context could be created") from exc
+
+        self.__cl_queue = cl.CommandQueue(
+            self.__cl_context,
+            properties=cl.command_queue_properties.PROFILING_ENABLE,
+        )
         
         if mask & OCLC_V :
-            self.__V_cla = cla.Array( self.__cl_queue , ( size , dim ) , dtype )
+            self.__V_cla = cla.Array( self.__cl_queue , ( self.__size , self.__dim ) , self.__dtype )
         else :
             self.__V_cla = None
 
-
         if mask & OCLC_X :
-            self.__X_cla = cla.Array( self.__cl_queue , ( size , dim ) , dtype )
+            self.__X_cla = cla.Array( self.__cl_queue , ( self.__size , self.__dim ) , self.__dtype )
         else :
             self.__X_cla = None
 
-            
         if mask & OCLC_A :
-            self.__A_cla = cla.Array( self.__cl_queue , ( size , dim ) , dtype )
+            self.__A_cla = cla.Array( self.__cl_queue , ( self.__size , self.__dim ) , self.__dtype )
         else :
             self.__A_cla = None
 
-            
         if mask & OCLC_M :
-            self.__M_cla = cla.Array( self.__cl_queue , ( size , 1 ) , dtype )
+            self.__M_cla = cla.Array( self.__cl_queue , ( self.__size , 1 ) , self.__dtype )
         else :
             self.__M_cla = None
                                     
@@ -113,17 +126,24 @@ class OpenCLcontext( object ):
         :param dtype: (Dafault: current) The dtype of the new array, if not specified by default it uses the context dtype
         """
         
-        if dim == None :
+        if dim is None :
             dim = self.__dim        
         
-        if size == None :
+        if size is None :
             size = self.__size
             
-        if dtype == None :
+        if dtype is None :
             dtype = self.dtype 
+
+        np_dtype = np.dtype(dtype)
+        if np_dtype != np.dtype(np.float32):
+            raise TypeError("PyParticles OpenCL kernels currently support only float32")
             
-            
-        self.__opt_arrays[key] = cla.Array( self.__cl_queue , ( size , dim ) , dtype=dtype )
+        self.__opt_arrays[key] = cla.Array(
+            self.__cl_queue,
+            ( int(size), int(dim) ),
+            dtype=np_dtype.type,
+        )
     
         
     def get_by_name( self , key ):
