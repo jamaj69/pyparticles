@@ -2,7 +2,15 @@
 """Benchmark the fountain physics core on CPU and resident OpenCL buffers."""
 
 import argparse
+from pathlib import Path
+import sys
 import time
+
+# Allow direct execution as ``python benchmarks/opencl_fountain.py`` from a
+# source checkout without requiring an editable install or PYTHONPATH tweak.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 
