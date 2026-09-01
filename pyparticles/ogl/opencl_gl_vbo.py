@@ -11,6 +11,8 @@ and performs one device-to-device copy.  No particle positions cross PCIe or
 enter a NumPy array in the steady-state rendering path.
 """
 
+import time
+
 import numpy as np
 
 try:
@@ -29,6 +31,16 @@ from OpenGL.GL import (
 )
 
 
+def _event_seconds(event):
+    """Return GPU execution time for a completed profiling-enabled CL event."""
+    if event is None:
+        return 0.0
+    try:
+        return max(0.0, (event.profile.end - event.profile.start) * 1.0e-9)
+    except Exception:
+        return 0.0
+
+
 class OpenCLGLPositionBuffer(object):
     """Mirror an OpenCL X buffer into a GL VBO without host transfers."""
 
@@ -45,6 +57,14 @@ class OpenCLGLPositionBuffer(object):
         self.__copy_calls = 0
         self.__copy_bytes = 0
         self.__closed = False
+        self.__last_profile = {
+            "gl_finish_wall_s": 0.0,
+            "acquire_gpu_s": 0.0,
+            "copy_gpu_s": 0.0,
+            "release_gpu_s": 0.0,
+            "release_wait_wall_s": 0.0,
+            "bridge_wall_s": 0.0,
+        }
 
         vertices = np.ascontiguousarray(pset.X, dtype=np.float32)
         self.__vbo = int(glGenBuffers(1))
@@ -64,7 +84,12 @@ class OpenCLGLPositionBuffer(object):
         if self.__closed:
             raise RuntimeError("The shared OpenGL position buffer is closed")
 
+        bridge_start = time.perf_counter()
+
+        gl_finish_start = time.perf_counter()
         glFinish()
+        gl_finish_end = time.perf_counter()
+
         acquire = self.__occ.acquire_gl_objects([self.__gl_buffer])
         copy = cl.enqueue_copy(
             self.__occ.CL_queue,
@@ -76,7 +101,20 @@ class OpenCLGLPositionBuffer(object):
         release = self.__occ.release_gl_objects(
             [self.__gl_buffer], wait_for=[copy]
         )
+
+        wait_start = time.perf_counter()
         release.wait()
+        wait_end = time.perf_counter()
+        bridge_end = wait_end
+
+        self.__last_profile = {
+            "gl_finish_wall_s": gl_finish_end - gl_finish_start,
+            "acquire_gpu_s": _event_seconds(acquire),
+            "copy_gpu_s": _event_seconds(copy),
+            "release_gpu_s": _event_seconds(release),
+            "release_wait_wall_s": wait_end - wait_start,
+            "bridge_wall_s": bridge_end - bridge_start,
+        }
 
         self.__copy_calls += 1
         self.__copy_bytes += self.__nbytes
@@ -148,3 +186,9 @@ class OpenCLGLPositionBuffer(object):
         }
 
     copy_stats = property(get_copy_stats)
+
+    def get_last_profile(self):
+        """Return timings for the most recent CL/GL bridge update."""
+        return dict(self.__last_profile)
+
+    last_profile = property(get_last_profile)
