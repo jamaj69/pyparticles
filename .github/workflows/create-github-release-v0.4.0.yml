@@ -1,4 +1,4 @@
-name: Create GitHub Release v0.4.0
+name: Backfill GitHub Release v0.4.0 assets
 
 on:
   push:
@@ -8,105 +8,41 @@ on:
       - ".github/workflows/create-github-release-v0.4.0.yml"
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
-  release:
-    name: Create stable GitHub release
+  release-assets:
+    name: Attach exact PyPI distributions
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - name: Download distributions from the original v0.4.0 release run
+        uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
+          name: python-package-distributions
+          path: dist/
+          repository: jamaj69/pyparticles
+          run-id: 33577097947
+          github-token: ${{ github.token }}
 
-      - name: Create release if missing
+      - name: Verify published artifact hashes
+        run: |
+          set -euo pipefail
+          cd dist
+          printf '%s  %s\n' \
+            'ea964d0fc482b495d0f680cc7ebbb550121d47653dccd93d3d4badd87e21171f' \
+            'pyparticles3-0.4.0-py3-none-any.whl' \
+            'd0746d6ce942019719feb85898f901dd8e57b8401b94d464f4d6551037cc626d' \
+            'pyparticles3-0.4.0.tar.gz' \
+            | sha256sum -c -
+
+      - name: Attach wheel and sdist to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.4.0 >/dev/null 2>&1; then
-            echo "GitHub Release v0.4.0 already exists; nothing to do."
-            exit 0
-          fi
-
-          cat > /tmp/release-notes.md <<'EOF'
-          PyParticles3 0.4.0 is the first stable release of the modernized PyParticles distribution after the 0.4.0rc1 and 0.4.0rc2 validation cycle.
-
-          ## Highlights
-
-          - Modern Python 3 packaging with `pyproject.toml` and setuptools.
-          - Python 3.11, 3.12 and 3.13 CI coverage.
-          - PyPI distribution name `PyParticles3`, while preserving the historical `pyparticles` import namespace.
-          - Command-line entry points: `pyparticles3`, `pyparticles_app`, and `python -m pyparticles`.
-          - Modern NumPy, SciPy, PyOpenGL and PyOpenCL compatibility.
-          - Persistent OpenCL buffers and fused compute paths.
-          - OpenCL/OpenGL shared-VBO rendering with double-buffered synchronization and GL fences.
-          - Explicit `PYOPENCL_CTX` device preservation: an explicitly selected device is never silently replaced just to obtain CL/GL sharing.
-          - Clear host-sync fallback when the selected OpenCL device cannot use `cl_khr_gl_sharing`.
-
-          ## Installation
-
-          Standard installation:
-
-          ```bash
-          python -m pip install 'PyParticles3==0.4.0'
-          ```
-
-          With OpenCL compute support:
-
-          ```bash
-          python -m pip install 'PyParticles3[opencl]==0.4.0'
-          ```
-
-          The standard PyOpenCL wheel may provide OpenCL compute while reporting `pyopencl.have_gl() == False`. For the high-performance CL/GL shared-buffer path, rebuild PyOpenCL from source with:
-
-          ```bash
-          python -m pip uninstall -y pyopencl
-
-          PYOPENCL_ENABLE_GL=ON \
-          python -m pip install \
-              --no-binary=pyopencl \
-              --no-cache-dir \
-              -v \
-              'pyopencl==2026.1.4'
-          ```
-
-          Then verify:
-
-          ```bash
-          python - <<'PY'
-          import pyopencl as cl
-          print("PyOpenCL :", cl.VERSION_TEXT)
-          print("have_gl  :", cl.have_gl())
-          assert cl.have_gl()
-          PY
-          ```
-
-          See the README for Debian build prerequisites and device-selection details.
-
-          ## Validation
-
-          The stable release promotes the code path validated in 0.4.0rc2. Validation included:
-
-          - clean PyPI installation and CLI smoke tests;
-          - NVIDIA GPU and Intel CPU OpenCL compute validation;
-          - CPU/OpenCL numerical agreement over complete Euler integration runs;
-          - persistent X/V device residency and transfer accounting;
-          - NVIDIA OpenCL/OpenGL shared-buffer rendering;
-          - Intel explicit-device fallback without silent migration to NVIDIA;
-          - a 2,000,000-particle fountain baseline of roughly 278-296 FPS on a GeForce GTX 1060 6 GB, with fused physics around 0.760 ms and the device-side X-to-VBO copy around 0.324 ms.
-
-          Performance figures are hardware-specific regression evidence, not a general performance guarantee.
-
-          ## Project history
-
-          PyParticles3 is an independent modernization and continuation of Simone Riva's original GPL-licensed PyParticles project. Original copyright notices and GPL-3.0-or-later licensing are preserved.
-
-          PyPI: https://pypi.org/project/PyParticles3/0.4.0/
-          EOF
-
-          gh release create v0.4.0 \
-            --verify-tag \
-            --title "PyParticles3 0.4.0" \
-            --notes-file /tmp/release-notes.md
+          set -euo pipefail
+          gh release upload v0.4.0 \
+            dist/pyparticles3-0.4.0-py3-none-any.whl \
+            dist/pyparticles3-0.4.0.tar.gz \
+            --clobber
