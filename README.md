@@ -23,43 +23,128 @@ The goal is to preserve the original project's unusually clear, educational arch
 
 ## Installation
 
-The current release candidate is `PyParticles3 0.4.0rc2`.
+The current published release candidate is **PyParticles3 0.4.0rc2**. The Python import namespace remains `pyparticles`.
+
+PyParticles3 requires Python 3.11 or newer.
+
+### 1. Standard installation
+
+Install the current release candidate from PyPI:
 
 ```bash
-python -m pip install PyParticles3
+python -m pip install --upgrade pip
+python -m pip install 'PyParticles3==0.4.0rc2'
 ```
 
-For OpenCL compute support:
+Verify the installation:
 
 ```bash
-python -m pip install 'PyParticles3[opencl]'
+pyparticles3 --version
+python -m pyparticles --version
 ```
 
-The OpenCL runtime/ICD and an OpenGL/FreeGLUT implementation are system-level dependencies and are not installed by pip.
+Both commands should report:
 
-### OpenCL/OpenGL interoperability requires a GL-enabled PyOpenCL build
+```text
+0.4.0rc2
+```
 
-`PyParticles3[opencl]` installs PyOpenCL and is sufficient for OpenCL **compute**. It does **not** guarantee that the installed PyOpenCL binary was compiled with OpenGL interoperability enabled.
+The historical console command remains available for compatibility:
 
-Check the installed build with:
+```bash
+pyparticles_app --version
+```
+
+### 2. Installation with OpenCL compute support
+
+Install the optional OpenCL dependency set with:
+
+```bash
+python -m pip install 'PyParticles3[opencl]==0.4.0rc2'
+```
+
+This installs PyOpenCL, but it does **not** install a system OpenCL driver/ICD. A working NVIDIA, Intel, AMD, PoCL or other OpenCL runtime must already be installed on the operating system.
+
+List the OpenCL platforms and devices visible to PyOpenCL:
 
 ```bash
 python - <<'PY'
 import pyopencl as cl
-print("PyOpenCL:", cl.VERSION_TEXT)
-print("have_gl :", cl.have_gl())
+
+for pi, platform in enumerate(cl.get_platforms()):
+    print(f"Platform {pi}: {platform.name}")
+    for di, device in enumerate(platform.get_devices()):
+        print(f"  Device {di}: {device.name}")
 PY
 ```
 
-For the fast OpenCL/OpenGL shared-buffer path used by the `fountain` demo, the required result is:
+PyParticles3 follows PyOpenCL's `PYOPENCL_CTX` selector. For example:
 
-```text
-have_gl : True
+```bash
+PYOPENCL_CTX=0:0 pyparticles3 --demo fountain
+PYOPENCL_CTX=1:0 pyparticles3 --demo fountain
 ```
 
-If a PyPI wheel reports `have_gl : False`, OpenCL compute still works, but PyParticles3 cannot create `GLBuffer` objects and high-particle-count rendering must fall back to host synchronization. That fallback can be dramatically slower.
+An explicitly selected compute device is never silently replaced by a different OpenCL device merely to obtain OpenCL/OpenGL sharing.
 
-PyOpenCL's source-build documentation requires `PYOPENCL_ENABLE_GL=ON` to enable GL interoperability. A typical pip rebuild is:
+### 3. Check whether PyOpenCL has OpenGL interoperability
+
+The PyPI PyOpenCL wheel can provide fully working OpenCL compute while still being built **without** OpenGL interoperability. Check the installed build explicitly:
+
+```bash
+python - <<'PY'
+import pyopencl as cl
+
+print("PyOpenCL :", cl.VERSION_TEXT)
+print("Module   :", cl.__file__)
+print("have_gl  :", cl.have_gl())
+PY
+```
+
+For ordinary OpenCL compute, either value of `have_gl()` is acceptable.
+
+For the high-performance OpenCL/OpenGL shared-buffer path used by the `fountain` demo, PyOpenCL itself must report:
+
+```text
+have_gl  : True
+```
+
+If it reports:
+
+```text
+have_gl  : False
+```
+
+OpenCL compute still works, but PyParticles3 cannot create PyOpenCL `GLBuffer` objects. Rendering then uses host synchronization and can be dramatically slower for large particle counts.
+
+### 4. Build PyOpenCL from source with `have_gl=True`
+
+PyOpenCL's source-build documentation requires the build option `PYOPENCL_ENABLE_GL=ON` to enable OpenGL interoperability.
+
+#### Debian 12 / Debian-family build prerequisites
+
+A typical Debian installation can provide the native build dependencies with:
+
+```bash
+sudo apt update
+sudo apt install \
+    build-essential \
+    python3-dev \
+    cmake \
+    ninja-build \
+    pkg-config \
+    ocl-icd-opencl-dev \
+    libgl-dev \
+    freeglut3-dev
+```
+
+`ocl-icd-opencl-dev` supplies the OpenCL development headers and loader needed to compile against the system OpenCL installation. Your actual OpenCL implementation/ICD, such as the NVIDIA or Intel runtime, remains a separate system component.
+
+If Python comes from pyenv or another custom Python installation, make sure that installation includes its matching Python headers; the system `python3-dev` package applies to Debian's system Python.
+
+#### Rebuild PyOpenCL
+
+Inside the same virtual environment in which PyParticles3 is installed:
 
 ```bash
 python -m pip uninstall -y pyopencl
@@ -69,33 +154,83 @@ python -m pip install \
     --no-binary=pyopencl \
     --no-cache-dir \
     -v \
-    'pyopencl>=2026.1'
+    'pyopencl==2026.1.4'
 ```
 
-Then verify again:
+`--no-binary=pyopencl` is important: it forces a source build instead of reinstalling the precompiled wheel.
+
+The `0.4.0rc2` release was validated with PyOpenCL `2026.1.4`. Newer compatible PyOpenCL releases can also be built from source, but should be tested before being used as a release-validation baseline.
+
+#### Verify the resulting build
+
+Do not assume that a successful compilation enabled GL support. Require it explicitly:
 
 ```bash
 python - <<'PY'
 import pyopencl as cl
+
+print("PyOpenCL :", cl.VERSION_TEXT)
+print("Module   :", cl.__file__)
+print("have_gl  :", cl.have_gl())
+
 assert cl.have_gl(), "PyOpenCL was built without OpenGL interoperability"
-print("PyOpenCL GL interoperability: enabled")
 PY
 ```
 
-Building PyOpenCL from source also requires a C++17 compiler, Python/build dependencies, OpenCL headers and loader libraries, and OpenGL development headers appropriate to the operating system.
+The final line must be:
 
-## Selecting an OpenCL device
+```text
+have_gl  : True
+```
 
-PyParticles3 follows PyOpenCL's `PYOPENCL_CTX` selection for compute contexts. For example, on a system where platform 0 is an NVIDIA GPU and platform 1 is an Intel CPU:
+#### Verify the PyParticles3 CL/GL path
+
+Select an OpenCL GPU that can share the active OpenGL context and run:
 
 ```bash
 PYOPENCL_CTX=0:0 pyparticles3 --demo fountain
-PYOPENCL_CTX=1:0 pyparticles3 --demo fountain
 ```
 
-As of `0.4.0rc2`, an explicit `PYOPENCL_CTX` selection is also honored when PyParticles3 attempts to create a CL/GL sharing context. PyParticles3 will not silently move the simulation to another OpenCL device just because that other device supports `cl_khr_gl_sharing`.
+A successful shared-buffer path reports messages similar to:
 
-This matters on mixed systems. An Intel Xeon CPU OpenCL device can execute the simulation kernels but may not advertise or support `cl_khr_gl_sharing` with the active NVIDIA OpenGL context. In that case PyParticles3 keeps the selected Intel compute device and falls back to host-synchronized rendering instead of silently switching compute to the NVIDIA GPU.
+```text
+OpenCL/OpenGL interop enabled: positions render without host copies
+CL/GL sync: double-buffered VBOs with per-buffer GL fences
+CL/GL position path: X -> VBO device copy (stable)
+Interop device: NVIDIA GeForce ...
+```
+
+`pyopencl.have_gl() == True` means that the **PyOpenCL build** contains GL interoperability support. It does not guarantee that every OpenCL device can share the current OpenGL context. The selected device must also support `cl_khr_gl_sharing` and be compatible with the active GL context.
+
+For example, on a mixed NVIDIA-GPU/Intel-CPU system, an Intel CPU OpenCL device may run all simulation kernels correctly but not advertise `cl_khr_gl_sharing`. PyParticles3 then keeps the Intel device selected and explicitly falls back to host-synchronized rendering instead of moving the computation to NVIDIA.
+
+### 5. System OpenGL requirements
+
+Interactive rendering requires a working OpenGL implementation and FreeGLUT. These are operating-system dependencies and are not installed by pip.
+
+On Debian-family systems, the development packages used above include the common OpenGL/FreeGLUT headers. The graphics driver must still provide a working OpenGL runtime.
+
+### 6. Install from the Git repository
+
+For development or testing the current repository state:
+
+```bash
+git clone https://github.com/jamaj69/pyparticles.git
+cd pyparticles
+
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[dev]'
+```
+
+For development with OpenCL support:
+
+```bash
+python -m pip install -e '.[dev,opencl]'
+```
+
+If CL/GL interoperability is required, rebuild PyOpenCL with `PYOPENCL_ENABLE_GL=ON` after installing the editable package, using the procedure above.
 
 ## Current import namespace
 
@@ -155,7 +290,9 @@ The accelerated paths preserve these conceptual roles rather than replacing the 
 
 ## OpenCL/OpenGL fountain path
 
-The modern `fountain` demo can keep simulation state resident on the GPU and render from shared OpenGL buffers. The optimized fused path writes both the canonical OpenCL position buffer and the shared render VBO from the integration kernel, eliminating a separate device-to-device position copy.
+The modern `fountain` demo can keep simulation state resident on the GPU and render from shared OpenGL buffers.
+
+The stable default shared path copies positions from the canonical OpenCL position buffer into a shared OpenGL VBO entirely on the device. The code also contains an optional experimental fused render-mirror path that can write the shared render VBO directly from the integration kernel.
 
 Profiling can be enabled with:
 
@@ -166,19 +303,20 @@ PYPARTICLES_PROFILE_WARMUP=200 \
 pyparticles3 --demo fountain
 ```
 
-The experimental fused render mirror is currently selected with:
+The experimental fused render mirror is selected with:
 
 ```bash
 PYPARTICLES_CLGL_FUSED_MIRROR=1 \
 pyparticles3 --demo fountain
 ```
 
+A validated `0.4.0rc2` baseline on a GeForce GTX 1060 6 GB with 2,000,000 fountain particles produced roughly 278-296 FPS, with the fused physics kernel around 0.760 ms and the device-side X-to-VBO copy around 0.324 ms. Treat these numbers as a hardware-specific regression baseline, not as a general performance guarantee.
+
 ## Development
 
 ```bash
 git clone https://github.com/jamaj69/pyparticles.git
 cd pyparticles
-git switch package/pyparticles3
 
 python -m venv .venv
 source .venv/bin/activate
@@ -192,6 +330,8 @@ python -W default -m unittest discover -v -s tests
 Build the PyPI artifacts with:
 
 ```bash
+python -m pip install -U build twine
+rm -rf build dist *.egg-info
 python -m build
 python -m twine check dist/*
 ```
@@ -201,6 +341,7 @@ python -m twine check dist/*
 - Source: https://github.com/jamaj69/pyparticles
 - Issues: https://github.com/jamaj69/pyparticles/issues
 - Original project: https://github.com/simon-r/PyParticles
+- PyOpenCL installation/build documentation: https://documen.tician.de/pyopencl/misc.html
 
 When releases are published through PyPI Trusted Publishing from this GitHub repository, PyPI can verify the GitHub project links carried in the distribution metadata.
 
