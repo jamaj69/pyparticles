@@ -6,6 +6,8 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
+import os
+
 import numpy as np
 
 
@@ -50,6 +52,11 @@ class OpenCLcontext(object):
     context.  In GL-sharing mode normal particle arrays remain ordinary OpenCL
     buffers; a renderer may create :class:`pyopencl.GLBuffer` objects in the
     same context and copy positions VRAM-to-VRAM without crossing PCIe.
+
+    When ``PYOPENCL_CTX`` explicitly selects a device, GL-sharing context
+    creation honors that same selection.  PyParticles3 will not silently move
+    the simulation to a different OpenCL device merely because another device
+    supports ``cl_khr_gl_sharing``.
     """
 
     _VALID_NAMES = ("X", "V", "A", "M")
@@ -88,7 +95,8 @@ class OpenCLcontext(object):
         except Exception as exc:
             if self.__gl_sharing:
                 raise RuntimeError(
-                    "No OpenCL context could share the active OpenGL context"
+                    "No OpenCL context could share the active OpenGL context: %s"
+                    % exc
                 ) from exc
             raise RuntimeError("No usable OpenCL context could be created") from exc
 
@@ -110,30 +118,61 @@ class OpenCLcontext(object):
         }
         self.reset_transfer_stats()
 
+    def _gl_sharing_candidate_devices(self):
+        """Return candidate devices without overriding an explicit selection."""
+        selector = os.environ.get("PYOPENCL_CTX", "").strip()
+        if selector:
+            selected_context = cl.create_some_context(interactive=False)
+            devices = list(selected_context.devices)
+            if not devices:
+                raise RuntimeError(
+                    "PYOPENCL_CTX=%r did not select an OpenCL device" % selector
+                )
+            return devices, selector
+
+        devices = []
+        for platform in cl.get_platforms():
+            devices.extend(platform.get_devices())
+        return devices, None
+
     def _create_gl_sharing_context(self):
         if not hasattr(cl, "have_gl") or not cl.have_gl():
             raise RuntimeError("PyOpenCL was built without OpenGL interoperability")
 
         sharing = get_gl_sharing_context_properties()
+        candidates, selector = self._gl_sharing_candidate_devices()
         last_error = None
-        for platform in cl.get_platforms():
-            for device in platform.get_devices():
-                if "cl_khr_gl_sharing" not in device.extensions.split():
-                    continue
 
-                properties = [
-                    (cl.context_properties.PLATFORM, platform),
-                    *sharing,
-                ]
-                try:
-                    context = cl.Context(devices=[device], properties=properties)
-                except Exception as exc:
-                    last_error = exc
-                    continue
+        for device in candidates:
+            platform = device.platform
+            if "cl_khr_gl_sharing" not in device.extensions.split():
+                if selector is not None:
+                    raise RuntimeError(
+                        "PYOPENCL_CTX=%s selected %s, which does not advertise "
+                        "cl_khr_gl_sharing"
+                        % (selector, device.name.strip())
+                    )
+                continue
 
-                self.__platform = platform
-                self.__device = device
-                return context
+            properties = [
+                (cl.context_properties.PLATFORM, platform),
+                *sharing,
+            ]
+            try:
+                context = cl.Context(devices=[device], properties=properties)
+            except Exception as exc:
+                last_error = exc
+                if selector is not None:
+                    raise RuntimeError(
+                        "PYOPENCL_CTX=%s selected %s, but that device could not "
+                        "share the active OpenGL context: %s"
+                        % (selector, device.name.strip(), exc)
+                    ) from exc
+                continue
+
+            self.__platform = platform
+            self.__device = device
+            return context
 
         if last_error is not None:
             raise RuntimeError("No CL/GL sharing device accepted the active GL context") from last_error
