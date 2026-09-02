@@ -2,6 +2,40 @@
 
 All notable changes to the modernized distribution are documented here.
 
+## 0.4.0 - 2026-09-01
+
+First stable PyParticles3 release after the `0.4.0rc1` and `0.4.0rc2` validation cycle.
+
+### Release status
+
+- promote the validated `0.4.0rc2` code path to the stable `0.4.0` version;
+- keep the historical Python import namespace `pyparticles` while publishing the distribution as `PyParticles3`;
+- keep the `pyparticles3`, `pyparticles_app`, and `python -m pyparticles` entry points;
+- retain Python 3.11, 3.12, and 3.13 CI coverage;
+- retain PyPI Trusted Publishing through GitHub Actions OIDC.
+
+### Installation and OpenCL documentation
+
+- make the stable PyPI installation commands explicit;
+- distinguish PyOpenCL OpenCL-compute support from OpenCL/OpenGL interoperability;
+- document `pyopencl.have_gl()` verification;
+- document Debian-family native build prerequisites;
+- document the validated PyOpenCL 2026.1.4 source-build procedure using `PYOPENCL_ENABLE_GL=ON` and `--no-binary=pyopencl`;
+- document that an explicit `PYOPENCL_CTX` selection remains authoritative even when the selected device cannot use `cl_khr_gl_sharing`.
+
+### Validation inherited from rc2
+
+The final release is based on the rc2 code path that passed:
+
+- clean PyPI installation and CLI smoke tests;
+- OpenCL gravity and integration validation on NVIDIA GPU and Intel CPU implementations;
+- persistent device-residency and transfer-accounting tests;
+- NVIDIA OpenCL/OpenGL shared-buffer rendering;
+- Intel explicit-device fallback without silent migration to NVIDIA;
+- a 2,000,000-particle fountain baseline of roughly 278-296 FPS on a GeForce GTX 1060 6 GB, with fused physics around 0.760 ms and the device-side X-to-VBO copy around 0.324 ms.
+
+No physics algorithm or OpenCL kernel behavior is intentionally changed between the validated rc2 code path and the final `0.4.0` release preparation.
+
 ## 0.4.0rc2 - release candidate
 
 Follow-up release candidate based on installation and multi-ICD validation of `0.4.0rc1`.
