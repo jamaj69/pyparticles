@@ -22,7 +22,9 @@ import zlib
 v_major = 0
 v_minor = 4
 v_revision = 0
-v_prerelease = "rc1"
+v_prerelease = "rc2"
+
+_GL_INTEROP_WARNING_EMITTED = False
 
 
 def py_particle_version(r="s"):
@@ -37,6 +39,35 @@ def py_particle_version(r="s"):
     return (v_major, v_minor, v_revision)
 
 
+def _warn_if_pyopencl_lacks_gl(cl):
+    """Emit a one-time explanation when only compute OpenCL is available."""
+    global _GL_INTEROP_WARNING_EMITTED
+
+    if _GL_INTEROP_WARNING_EMITTED:
+        return
+
+    have_gl = getattr(cl, "have_gl", None)
+    if have_gl is None:
+        return
+
+    try:
+        gl_enabled = bool(have_gl())
+    except Exception:
+        return
+
+    if gl_enabled:
+        return
+
+    _GL_INTEROP_WARNING_EMITTED = True
+    print("")
+    print("WARNING: PyOpenCL was built without OpenGL interoperability (have_gl=False).")
+    print("OpenCL compute remains available, but CL/GL rendering will use host")
+    print("synchronization and can be much slower for large particle counts.")
+    print("For CL/GL interoperability, rebuild PyOpenCL from source with")
+    print("PYOPENCL_ENABLE_GL=ON and verify that pyopencl.have_gl() is True.")
+    print("")
+
+
 def test_pyopencl():
     """Return True only when PyOpenCL has at least one usable device."""
     try:
@@ -45,11 +76,15 @@ def test_pyopencl():
         return False
 
     try:
-        return any(platform.get_devices() for platform in cl.get_platforms())
+        usable = any(platform.get_devices() for platform in cl.get_platforms())
     except Exception:
         # Broken/missing ICDs may allow importing pyopencl while still making
         # every OpenCL operation unusable.
         return False
+
+    if usable:
+        _warn_if_pyopencl_lacks_gl(cl)
+    return usable
 
 
 def about():
