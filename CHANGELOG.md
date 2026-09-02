@@ -17,11 +17,16 @@ Follow-up release candidate based on installation and multi-ICD validation of `0
 
 ### Validation
 
+- published `PyParticles3 0.4.0rc2` to PyPI using GitHub Actions Trusted Publishing/OIDC;
+- validated a clean PyPI installation and all published CLI entry points;
+- validated that the standard PyOpenCL wheel can report `have_gl=False` and that PyParticles3 emits the intended diagnostic while retaining OpenCL compute support;
+- rebuilt PyOpenCL 2026.1.4 from source with `PYOPENCL_ENABLE_GL=ON` and validated `pyopencl.have_gl() is True`;
 - validated OpenCL gravity kernels on NVIDIA GTX 1060 and Intel Xeon E5-2697 v2 OpenCL implementations;
 - validated CPU/OpenCL numerical agreement over complete Euler integration runs;
 - validated persistent X/V device residency and transfer accounting;
-- validated clean PyPI installation and all published CLI entry points;
-- validated the high-performance fountain CL/GL path with a GL-enabled PyOpenCL build.
+- validated the high-performance fountain CL/GL path on NVIDIA;
+- validated that `PYOPENCL_CTX=1:0` keeps Intel selected and explicitly falls back to host synchronization when the Intel device does not advertise `cl_khr_gl_sharing`;
+- validated a 2,000,000-particle fountain baseline on a GeForce GTX 1060 6 GB at roughly 278-296 FPS, with the fused physics kernel around 0.760 ms and X-to-VBO device copy around 0.324 ms.
 
 ## 0.4.0rc1 - release candidate
 
