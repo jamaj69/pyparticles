@@ -23,6 +23,22 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      - name: Verify tag matches project version
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+
+          with open("pyproject.toml", "rb") as stream:
+              version = tomllib.load(stream)["project"]["version"]
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected = f"v{version}"
+          print(f"tag={tag} project.version={version}")
+          if tag != expected:
+              raise SystemExit(f"release tag {tag!r} does not match expected {expected!r}")
+          PY
+
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
