@@ -23,17 +23,17 @@ The goal is to preserve the original project's unusually clear, educational arch
 
 ## Installation
 
-The current published release candidate is **PyParticles3 0.4.0rc2**. The Python import namespace remains `pyparticles`.
+The stable release line is **PyParticles3 0.4.0**. The Python import namespace remains `pyparticles`.
 
 PyParticles3 requires Python 3.11 or newer.
 
 ### 1. Standard installation
 
-Install the current release candidate from PyPI:
+Install PyParticles3 from PyPI:
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install 'PyParticles3==0.4.0rc2'
+python -m pip install 'PyParticles3==0.4.0'
 ```
 
 Verify the installation:
@@ -46,7 +46,7 @@ python -m pyparticles --version
 Both commands should report:
 
 ```text
-0.4.0rc2
+0.4.0
 ```
 
 The historical console command remains available for compatibility:
@@ -60,7 +60,7 @@ pyparticles_app --version
 Install the optional OpenCL dependency set with:
 
 ```bash
-python -m pip install 'PyParticles3[opencl]==0.4.0rc2'
+python -m pip install 'PyParticles3[opencl]==0.4.0'
 ```
 
 This installs PyOpenCL, but it does **not** install a system OpenCL driver/ICD. A working NVIDIA, Intel, AMD, PoCL or other OpenCL runtime must already be installed on the operating system.
@@ -159,7 +159,7 @@ python -m pip install \
 
 `--no-binary=pyopencl` is important: it forces a source build instead of reinstalling the precompiled wheel.
 
-The `0.4.0rc2` release was validated with PyOpenCL `2026.1.4`. Newer compatible PyOpenCL releases can also be built from source, but should be tested before being used as a release-validation baseline.
+The `0.4.0` release line was qualified with PyOpenCL `2026.1.4`. Newer compatible PyOpenCL releases can also be built from source, but should be tested before being used as a release-validation baseline.
 
 #### Verify the resulting build
 
@@ -234,13 +234,13 @@ If CL/GL interoperability is required, rebuild PyOpenCL with `PYOPENCL_ENABLE_GL
 
 ## Current import namespace
 
-The initial PyParticles3 packaging release intentionally keeps the historical Python import namespace:
+The PyParticles3 0.4.x release line intentionally keeps the historical Python import namespace:
 
 ```python
 import pyparticles
 ```
 
-This avoids mixing a package-wide namespace migration with the packaging release. A future release may introduce a dedicated `pyparticles3` namespace after a controlled compatibility migration.
+This avoids mixing a package-wide namespace migration with the first modernized stable release. A future release may introduce a dedicated `pyparticles3` namespace after a controlled compatibility migration.
 
 ## Command line
 
@@ -310,7 +310,7 @@ PYPARTICLES_CLGL_FUSED_MIRROR=1 \
 pyparticles3 --demo fountain
 ```
 
-A validated `0.4.0rc2` baseline on a GeForce GTX 1060 6 GB with 2,000,000 fountain particles produced roughly 278-296 FPS, with the fused physics kernel around 0.760 ms and the device-side X-to-VBO copy around 0.324 ms. Treat these numbers as a hardware-specific regression baseline, not as a general performance guarantee.
+The final `0.4.0` release is based on the validated `0.4.0rc2` code path. The release-candidate baseline on a GeForce GTX 1060 6 GB with 2,000,000 fountain particles produced roughly 278-296 FPS, with the fused physics kernel around 0.760 ms and the device-side X-to-VBO copy around 0.324 ms. Treat these numbers as a hardware-specific regression baseline, not as a general performance guarantee.
 
 ## Development
 
