@@ -23,21 +23,79 @@ The goal is to preserve the original project's unusually clear, educational arch
 
 ## Installation
 
-The first PyPI release is planned as `PyParticles3 0.4.0rc1`.
-
-Once published:
+The current release candidate is `PyParticles3 0.4.0rc2`.
 
 ```bash
 python -m pip install PyParticles3
 ```
 
-For OpenCL support:
+For OpenCL compute support:
 
 ```bash
 python -m pip install 'PyParticles3[opencl]'
 ```
 
 The OpenCL runtime/ICD and an OpenGL/FreeGLUT implementation are system-level dependencies and are not installed by pip.
+
+### OpenCL/OpenGL interoperability requires a GL-enabled PyOpenCL build
+
+`PyParticles3[opencl]` installs PyOpenCL and is sufficient for OpenCL **compute**. It does **not** guarantee that the installed PyOpenCL binary was compiled with OpenGL interoperability enabled.
+
+Check the installed build with:
+
+```bash
+python - <<'PY'
+import pyopencl as cl
+print("PyOpenCL:", cl.VERSION_TEXT)
+print("have_gl :", cl.have_gl())
+PY
+```
+
+For the fast OpenCL/OpenGL shared-buffer path used by the `fountain` demo, the required result is:
+
+```text
+have_gl : True
+```
+
+If a PyPI wheel reports `have_gl : False`, OpenCL compute still works, but PyParticles3 cannot create `GLBuffer` objects and high-particle-count rendering must fall back to host synchronization. That fallback can be dramatically slower.
+
+PyOpenCL's source-build documentation requires `PYOPENCL_ENABLE_GL=ON` to enable GL interoperability. A typical pip rebuild is:
+
+```bash
+python -m pip uninstall -y pyopencl
+
+PYOPENCL_ENABLE_GL=ON \
+python -m pip install \
+    --no-binary=pyopencl \
+    --no-cache-dir \
+    -v \
+    'pyopencl>=2026.1'
+```
+
+Then verify again:
+
+```bash
+python - <<'PY'
+import pyopencl as cl
+assert cl.have_gl(), "PyOpenCL was built without OpenGL interoperability"
+print("PyOpenCL GL interoperability: enabled")
+PY
+```
+
+Building PyOpenCL from source also requires a C++17 compiler, Python/build dependencies, OpenCL headers and loader libraries, and OpenGL development headers appropriate to the operating system.
+
+## Selecting an OpenCL device
+
+PyParticles3 follows PyOpenCL's `PYOPENCL_CTX` selection for compute contexts. For example, on a system where platform 0 is an NVIDIA GPU and platform 1 is an Intel CPU:
+
+```bash
+PYOPENCL_CTX=0:0 pyparticles3 --demo fountain
+PYOPENCL_CTX=1:0 pyparticles3 --demo fountain
+```
+
+As of `0.4.0rc2`, an explicit `PYOPENCL_CTX` selection is also honored when PyParticles3 attempts to create a CL/GL sharing context. PyParticles3 will not silently move the simulation to another OpenCL device just because that other device supports `cl_khr_gl_sharing`.
+
+This matters on mixed systems. An Intel Xeon CPU OpenCL device can execute the simulation kernels but may not advertise or support `cl_khr_gl_sharing` with the active NVIDIA OpenGL context. In that case PyParticles3 keeps the selected Intel compute device and falls back to host-synchronized rendering instead of silently switching compute to the NVIDIA GPU.
 
 ## Current import namespace
 
