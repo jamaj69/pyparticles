@@ -40,6 +40,7 @@ jobs:
       - name: Attach wheel and sdist to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           gh release upload v0.4.0 \
