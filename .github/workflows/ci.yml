@@ -70,5 +70,8 @@ jobs:
       - name: Install wheel smoke test
         run: |
           python -m pip install dist/*.whl
-          pyparticles3 --version
-          python -m pyparticles --version
+          expected="$(python -c 'from importlib.metadata import version; print(version("PyParticles3"))')"
+          test "$(pyparticles3 --version)" = "$expected"
+          test "$(pyparticles_app --version)" = "$expected"
+          test "$(python -m pyparticles --version)" = "$expected"
+          echo "PyParticles3 wheel and CLI version: $expected"
