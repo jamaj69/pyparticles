@@ -2,9 +2,30 @@
 
 All notable changes to the modernized distribution are documented here.
 
+## 0.4.0rc2 - release candidate
+
+Follow-up release candidate based on installation and multi-ICD validation of `0.4.0rc1`.
+
+### OpenCL/OpenGL interoperability
+
+- document that `PyParticles3[opencl]` guarantees OpenCL compute support but does not guarantee a PyOpenCL build with OpenGL interoperability;
+- add an explicit runtime warning when `pyopencl.have_gl()` is `False`;
+- document rebuilding PyOpenCL from source with `PYOPENCL_ENABLE_GL=ON` and verifying `pyopencl.have_gl() is True`;
+- preserve an explicit `PYOPENCL_CTX` device selection when creating a CL/GL sharing context;
+- do not silently migrate an explicitly selected Intel CPU OpenCL workload to an NVIDIA GPU merely to obtain `cl_khr_gl_sharing`;
+- improve CL/GL failure messages so host-synchronized fallback identifies why sharing is unavailable.
+
+### Validation
+
+- validated OpenCL gravity kernels on NVIDIA GTX 1060 and Intel Xeon E5-2697 v2 OpenCL implementations;
+- validated CPU/OpenCL numerical agreement over complete Euler integration runs;
+- validated persistent X/V device residency and transfer accounting;
+- validated clean PyPI installation and all published CLI entry points;
+- validated the high-performance fountain CL/GL path with a GL-enabled PyOpenCL build.
+
 ## 0.4.0rc1 - release candidate
 
-First release candidate planned under the **PyParticles3** distribution name.
+First release candidate under the **PyParticles3** distribution name.
 
 ### Packaging
 
