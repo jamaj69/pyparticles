@@ -22,7 +22,7 @@ import zlib
 v_major = 0
 v_minor = 4
 v_revision = 0
-v_prerelease = "rc2"
+v_prerelease = ""
 
 _GL_INTEROP_WARNING_EMITTED = False
 
