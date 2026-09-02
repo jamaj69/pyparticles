@@ -1,4 +1,4 @@
-name: Release to PyPI
+name: Release to PyPI and GitHub
 
 on:
   push:
@@ -75,3 +75,50 @@ jobs:
 
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create or update GitHub Release
+    needs:
+      - build
+      - publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the exact distributions published to PyPI
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Create or update GitHub Release and attach distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "GitHub Release $tag already exists; preserving its notes."
+            gh release edit "$tag" --title "PyParticles3 $version"
+          else
+            if [[ "$version" =~ (a|b|rc)[0-9]+$ ]]; then
+              gh release create "$tag" \
+                --verify-tag \
+                --title "PyParticles3 $version" \
+                --generate-notes \
+                --prerelease
+            else
+              gh release create "$tag" \
+                --verify-tag \
+                --title "PyParticles3 $version" \
+                --generate-notes
+            fi
+          fi
+
+          echo "Attaching the same wheel/sdist artifact that was published to PyPI:"
+          sha256sum dist/*
+          gh release upload "$tag" dist/* --clobber
